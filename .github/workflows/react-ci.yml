@@ -26,9 +26,6 @@ jobs:
       - name: Run linter
         run: npm run lint --if-present
 
-    #   - name: Run tests
-    #     run: npm test -- --watchAll=false --passWithNoTests
-
       - name: Build React app
         run: npm run build
 
@@ -36,4 +33,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: react-build
-          path: build
+          path: dist    # ⚠️ Vite outputs to `dist`, not `build`
