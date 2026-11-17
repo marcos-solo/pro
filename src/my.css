@@ -97,16 +97,13 @@ p,
 }
 
 .brand-mark {
-  width: 30px;
-  height: 30px;
-  display: grid;
-  place-items: center;
-  border-radius: 9px;
-  background: var(--green);
-  color: white;
-  font-family: var(--font-serif);
-  font-size: 20px;
-  font-weight: 500;
+  width: 34px;
+  height: 34px;
+  display: block;
+  object-fit: contain;
+  border-radius: 0;
+  background: transparent;
+  filter: drop-shadow(0 10px 14px rgba(49, 79, 127, 0.12));
 }
 
 .site-nav {
@@ -602,7 +599,7 @@ p,
   font-size: 11px;
 }
 .footer-brand { color: var(--ink); font-size: 15px; }
-.footer-brand .brand-mark { width: 24px; height: 24px; border-radius: 7px; font-size: 16px; }
+.footer-brand .brand-mark { width: 24px; height: 24px; }
 .site-footer > a:last-child { color: #5d6e62; }
 .site-footer > a:last-child:hover { color: var(--green); }
 

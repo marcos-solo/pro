@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Netwise logo mark">
+  <defs>
+    <linearGradient id="netwiseGradient" x1="18" x2="220" y1="18" y2="220" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1d2e8d"/>
+      <stop offset="0.42" stop-color="#d65d8e"/>
+      <stop offset="0.72" stop-color="#f7ad7a"/>
+      <stop offset="1" stop-color="#f7d8a2"/>
+    </linearGradient>
+    <linearGradient id="netwiseHighlight" x1="76" x2="164" y1="56" y2="182" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.45"/>
+      <stop offset="0.42" stop-color="#ffffff" stop-opacity="0.12"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="netwiseShadow" x1="48" x2="170" y1="48" y2="206" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1a2569" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#c74c85" stop-opacity="0.2"/>
+    </linearGradient>
+  </defs>
+
+  <g transform="translate(10 10)">
+    <path d="M70 32h38l45 87V32h27v192h-38L97 111v113H70V32Z" fill="url(#netwiseGradient)"/>
+    <path d="M95 32h76v24H95z" fill="#d7e2ff" opacity="0.18"/>
+    <path d="M130 80l24 44V32h25v175l-25 0-52-95v95h-25V32h25l52 48Z" fill="url(#netwiseShadow)" opacity="0.42"/>
+    <path d="M158 32h24v193h-24V32Z" fill="#f7d4b9" opacity="0.16"/>
+    <path d="M224 185l-36-66 25 0 35 66-24 0Z" fill="#f3efe8" opacity="0.18"/>
+    <path d="M52 48l55 83V42H92v110l-29-46V42H52v92l42 62h25l-14-22-27-42-3 3Z" fill="url(#netwiseHighlight)" opacity="0.8"/>
+    <path d="M40 163l53-74 15 0-44 74H40Z" fill="#fcead9" opacity="0.18"/>
+  </g>
+</svg>

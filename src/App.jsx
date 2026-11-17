@@ -68,7 +68,7 @@ function App() {
     <div className="app" onClick={navigate}>
       <header className="site-header">
         <a className="brand" href="/" aria-label="Netwise home">
-          <span className="brand-mark" aria-hidden="true">n</span>
+          <img className="brand-mark" src="/logo-mark.svg" alt="" aria-hidden="true" />
           <span>netwise</span>
         </a>
         <button
@@ -97,7 +97,7 @@ function App() {
 
       <footer className="site-footer">
         <a className="brand footer-brand" href="/">
-          <span className="brand-mark" aria-hidden="true">n</span><span>netwise</span>
+          <img className="brand-mark" src="/logo-mark.svg" alt="" aria-hidden="true" /><span>netwise</span>
         </a>
         <span>Networking, one connection at a time.</span>
         <a href="/learn">Learning guides <span aria-hidden="true">↗</span></a>
