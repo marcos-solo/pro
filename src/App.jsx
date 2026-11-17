@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import About from './About.jsx';
 import Learn from './Learn.jsx';
 import Simulator from './Simulator.jsx';
-import './App.css';
+import './my.css';
 
 const pagePaths = {
   home: '/',

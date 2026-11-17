@@ -1,16 +1,28 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { simulatePacket } from './networkEngine.js';
 
 const initialNodes = [
-  { id: 1, name: 'Laptop', type: 'Device', x: 18, y: 48, ip: '192.168.1.4' },
-  { id: 2, name: 'Router', type: 'Router', x: 43, y: 48, ip: '192.168.1.1' },
-  { id: 3, name: 'Switch', type: 'Switch', x: 67, y: 30, ip: '192.168.1.2' },
-  { id: 4, name: 'Web server', type: 'Server', x: 82, y: 68, ip: '93.184.216.34' },
+  { id: 1, name: 'Laptop', type: 'Device', x: 18, y: 48, ip: '192.168.1.4', prefixLength: 24, gateway: '192.168.1.1' },
+  {
+    id: 2,
+    name: 'Router',
+    type: 'Router',
+    x: 67,
+    y: 30,
+    ip: '192.168.1.1',
+    interfaces: [
+      { ip: '192.168.1.1', prefixLength: 24, mac: '02:00:00:00:00:21' },
+      { ip: '93.184.216.1', prefixLength: 24, mac: '02:00:00:00:00:22' },
+    ],
+  },
+  { id: 3, name: 'Switch', type: 'Switch', x: 43, y: 48, ip: '192.168.1.2', prefixLength: 24 },
+  { id: 4, name: 'Web server', type: 'Server', x: 82, y: 68, ip: '93.184.216.34', prefixLength: 24, gateway: '93.184.216.1' },
 ];
 
 const initialLinks = [
-  { from: 1, to: 2 },
-  { from: 2, to: 3 },
-  { from: 3, to: 4 },
+  { from: 1, to: 3 },
+  { from: 3, to: 2 },
+  { from: 2, to: 4 },
 ];
 
 const deviceTypes = ['Device', 'Router', 'Switch', 'Server'];
@@ -23,42 +35,11 @@ const nodePositions = [
   { x: 85, y: 78 },
 ];
 
-const deviceScript = {
-  Device: (node) => `Your device sends the packet from ${node.ip}. It needs to reach the destination IP.`,
-  Router: () => 'The router receives the packet. It reads the destination IP, looks at its routing table, and decides the next hop.',
-  Switch: () => 'The switch receives the packet. It forwards it to the correct port based on the destination MAC address — no IP logic here.',
-  Server: () => 'The web server receives the packet, checks the HTTP request, and prepares a response to send back.',
-};
-
 const lessonNames = {
   'ip-address': 'IP addresses',
   'routers-switches': 'Routers and switches',
   'follow-packet': 'Follow a packet',
 };
-
-function findRoute(nodes, links, sourceId, destinationId) {
-  const queue = [[sourceId]];
-  const visited = new Set([sourceId]);
-
-  while (queue.length) {
-    const route = queue.shift();
-    const currentId = route[route.length - 1];
-    if (currentId === destinationId) return route;
-
-    const neighbors = links.flatMap(({ from, to }) => (
-      from === currentId ? [to] : to === currentId ? [from] : []
-    ));
-
-    for (const neighbor of neighbors) {
-      if (!visited.has(neighbor) && nodes.some((node) => node.id === neighbor)) {
-        visited.add(neighbor);
-        queue.push([...route, neighbor]);
-      }
-    }
-  }
-
-  return [];
-}
 
 function getInitialEndpointId(param, fallbackId) {
   const address = new URLSearchParams(window.location.search).get(param);
@@ -97,13 +78,17 @@ function Simulator() {
   // Canvas pan state
   const [pan, setPan] = useState(null); // { pointerId, startX, startY, startViewX, startViewY }
 
-  const route = useMemo(
-    () => findRoute(nodes, links, sourceId, destinationId),
+  const simulation = useMemo(
+    () => simulatePacket({ nodes, links, sourceId, destinationId }),
     [nodes, links, sourceId, destinationId],
   );
+  const trace = simulation.events;
+  const currentEvent = trace[currentHop];
   const selectedNode = nodes.find((node) => node.id === selectedNodeId) ?? nodes[0];
-  const currentNode = route.length ? nodes.find((node) => node.id === route[currentHop]) : null;
-  const isDelivered = isRunning && route.length > 0 && currentHop === route.length - 1;
+  const currentNode = currentEvent ? nodes.find((node) => node.id === currentEvent.nodeId) : null;
+  const isFinished = isRunning && currentHop === trace.length - 1;
+  const isDelivered = isFinished && currentEvent?.kind === 'delivery';
+  const isFailed = isFinished && currentEvent?.kind === 'error';
   const activeLesson = new URLSearchParams(window.location.search).get('lesson');
 
   const resetSimulation = () => {
@@ -113,12 +98,12 @@ function Simulator() {
   };
 
   useEffect(() => {
-    if (!isRunning || isPaused || isDelivered) return undefined;
+    if (!isRunning || isPaused || isFinished) return undefined;
     const timer = window.setTimeout(() => {
-      setCurrentHop((hop) => Math.min(hop + 1, route.length - 1));
+      setCurrentHop((hop) => Math.min(hop + 1, trace.length - 1));
     }, 1100);
     return () => window.clearTimeout(timer);
-  }, [isRunning, isPaused, isDelivered, currentHop, route.length]);
+  }, [isRunning, isPaused, isFinished, currentHop, trace.length]);
 
   // ---- Convert client coords → canvas % coords (accounts for pan + zoom) ----
   const toCanvasPercent = (clientX, clientY) => {
@@ -359,8 +344,8 @@ function Simulator() {
       setSimMessage('Choose different source and destination devices.');
       return;
     }
-    if (!route.length) {
-      setSimMessage('There is no connection between those devices. Connect the network first.');
+    if (!trace.length) {
+      setSimMessage(simulation.error ?? 'There is no valid packet path between those devices.');
       return;
     }
     setCurrentHop(0);
@@ -377,7 +362,7 @@ function Simulator() {
   };
 
   const nextHop = () => {
-    if (currentHop < route.length - 1) {
+    if (currentHop < trace.length - 1) {
       setIsPaused(true);
       setCurrentHop((hop) => hop + 1);
     }
@@ -392,7 +377,17 @@ function Simulator() {
 
   const updateSelectedNode = (field, value) => {
     setNodes((current) => current.map((node) => (
-      node.id === selectedNodeId ? { ...node, [field]: value } : node
+      node.id === selectedNodeId
+        ? {
+          ...node,
+          [field]: value,
+          ...(field === 'ip' && node.interfaces?.length
+            ? { interfaces: node.interfaces.map((networkInterface, index) => (
+              index === 0 ? { ...networkInterface, ip: value } : networkInterface
+            )) }
+            : {}),
+        }
+        : node
     )));
   };
 
@@ -486,7 +481,9 @@ function Simulator() {
           {isRunning
             ? isDelivered
               ? 'Packet delivered'
-              : `Hop ${currentHop + 1} of ${route.length}`
+              : isFailed
+                ? 'Packet stopped'
+                : `Step ${currentHop + 1} of ${trace.length}`
             : connectMode
               ? connectFromId === null ? 'Select the first device' : 'Select the second device'
               : `${nodes.length} devices · ${links.length} connections`}
@@ -505,9 +502,10 @@ function Simulator() {
               const fromNode = nodes.find((node) => node.id === from);
               const toNode = nodes.find((node) => node.id === to);
               if (!fromNode || !toNode) return null;
-              const isActiveLink = isRunning && route.slice(0, -1).some((id, index) => (
-                (id === from && route[index + 1] === to) || (id === to && route[index + 1] === from)
-              ));
+              const isActiveLink = isRunning && currentEvent?.fromId !== null && (
+                (currentEvent?.fromId === from && currentEvent?.nodeId === to)
+                || (currentEvent?.fromId === to && currentEvent?.nodeId === from)
+              );
               const mx = (fromNode.x + toNode.x) / 2;
               const my = (fromNode.y + toNode.y) / 2;
               return (
@@ -562,9 +560,8 @@ function Simulator() {
           </svg>
 
           {nodes.map((node) => {
-            const routeIndex = route.indexOf(node.id);
-            const isCurrent = isRunning && routeIndex === currentHop;
-            const isVisited = isRunning && routeIndex !== -1 && routeIndex < currentHop;
+            const isCurrent = isRunning && currentEvent?.nodeId === node.id;
+            const isVisited = isRunning && trace.slice(0, currentHop).some((event) => event.nodeId === node.id);
             const isSelected = selectedNodeId === node.id;
             const isDragging = drag?.nodeId === node.id && drag.moved;
             return (
@@ -613,8 +610,8 @@ function Simulator() {
         <section className="simulator-card packet-setup" aria-label="Packet settings">
           <div className="simulator-card-heading">
             <div><p className="section-kicker">PACKET JOURNEY</p><h2>Choose where it goes</h2></div>
-            <span className={`route-status${route.length ? ' route-ready' : ''}`}>
-              {route.length ? `${route.length} hops` : 'No route'}
+            <span className={`route-status${trace.length && !simulation.error ? ' route-ready' : ''}`}>
+              {trace.length && !simulation.error ? `${trace.length} steps` : 'No route'}
             </span>
           </div>
           <div className="endpoint-selects">
@@ -635,11 +632,14 @@ function Simulator() {
             </label>
           </div>
           <div className="route-preview" aria-live="polite">
-            {route.length
-              ? route.map((id) => nodes.find((node) => node.id === id)?.name).filter(Boolean).join('  →  ')
-              : 'Connect these devices to create a route.'}
+            {trace.length
+              ? [...new Set(trace.map((event) => nodes.find((node) => node.id === event.nodeId)?.name).filter(Boolean))]
+                .join('  →  ')
+              : simulation.error ?? 'Connect these devices to create a route.'}
           </div>
-          {simMessage && <p className="sim-message" role="status">{simMessage}</p>}
+          {(simMessage || (simulation.error && !isRunning)) && (
+            <p className="sim-message" role="status">{simMessage || simulation.error}</p>
+          )}
           <div className="packet-card">
             <div className="packet-card-row">
               <span>Source IP</span><code>{nodes.find((node) => node.id === sourceId)?.ip ?? '—'}</code>
@@ -654,7 +654,7 @@ function Simulator() {
                 className="button button-primary"
                 type="button"
                 onClick={startTraffic}
-                disabled={!route.length || sourceId === destinationId}
+                disabled={!trace.length || sourceId === destinationId}
               >
                 ▶ Send packet
               </button>
@@ -663,7 +663,7 @@ function Simulator() {
                 <button className="button button-secondary" type="button" onClick={prevHop} disabled={currentHop === 0}>
                   ← Back
                 </button>
-                {!isDelivered && (
+                {!isFinished && (
                   <button
                     className="button button-secondary"
                     type="button"
@@ -672,8 +672,8 @@ function Simulator() {
                     {isPaused ? '▶ Resume' : 'Ⅱ Pause'}
                   </button>
                 )}
-                <button className="button button-secondary" type="button" onClick={nextHop} disabled={isDelivered}>
-                  Next hop →
+                <button className="button button-secondary" type="button" onClick={nextHop} disabled={isFinished}>
+                  Next step →
                 </button>
                 {isDelivered && (
                   <button className="button button-primary" type="button" onClick={startTraffic}>
@@ -729,20 +729,20 @@ function Simulator() {
           <div className="simulator-card-heading">
             <div>
               <p className="section-kicker">
-                {isDelivered ? 'DELIVERED' : `HOP ${currentHop + 1} OF ${route.length}`}
+                {isDelivered
+                  ? 'DELIVERED'
+                  : isFailed
+                    ? 'PACKET STOPPED'
+                    : `STEP ${currentHop + 1} OF ${trace.length}`}
               </p>
-              <h2>{currentNode.name}</h2>
+              <h2>{currentEvent.title}</h2>
             </div>
             <span className="inspector-type">{currentNode.type}</span>
           </div>
-          <p>
-            {isDelivered
-              ? `The packet reached ${currentNode.name} at ${currentNode.ip}. A response can now travel back to the source.`
-              : (deviceScript[currentNode.type] ?? deviceScript.Device)(currentNode)}
-          </p>
-          <div className="hop-progress" aria-label={`Step ${currentHop + 1} of ${route.length}`}>
-            {route.map((id, index) => (
-              <span className={index <= currentHop ? 'is-complete' : ''} key={id} />
+          <p>{currentEvent.description}</p>
+          <div className="hop-progress" aria-label={`Step ${currentHop + 1} of ${trace.length}`}>
+            {trace.map((event, index) => (
+              <span className={index <= currentHop ? 'is-complete' : ''} key={`${event.nodeId}-${event.title}-${index}`} />
             ))}
           </div>
         </section>
