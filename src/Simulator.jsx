@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { CHALLENGES } from './Challenges.jsx';
 import {
+  calculateDynamicRoutes,
+  calculateSpanningTree,
   calculateSubnet,
   primaryInterface,
   resolveDns,
@@ -24,11 +26,14 @@ import {
 import {
   applyTerminalConfiguration,
   completeTerminalInput,
+  generateCiscoConfig,
+  getDeviceCommands,
   parseCommandLine,
   suggestCommand,
   terminalPrompt,
-  getDeviceCommands,
 } from './terminalEngine.js';
+import { LabBuilderModal } from './LabBuilderModal.jsx';
+import { WalkthroughTour } from './WalkthroughTour.jsx';
 
 /* ------------------------------------------------------------------ */
 /*  Device catalog & initial topologies                                */
@@ -79,7 +84,7 @@ const initialNodes = [
     id: 8, name: 'Firewall', type: 'Firewall', x: 55, y: 20,
     interfaces: [
       { name: 'outside', ip: '93.184.216.1', prefixLength: 24, mac: '02:00:00:00:00:81' },
-      { name: 'inside',  ip: '192.168.1.1',  prefixLength: 24, mac: '02:00:00:00:00:82' },
+      { name: 'inside', ip: '192.168.1.1', prefixLength: 24, mac: '02:00:00:00:00:82' },
     ],
     rules: [],
   },
@@ -215,6 +220,15 @@ const DEVICE_CATALOG = [
   { group: 'Network devices', items: ['Switch', 'L3Switch', 'Router'] },
   { group: 'Wireless', items: ['AccessPoint'] },
   { group: 'Security / WAN', items: ['Firewall', 'Modem'] },
+];
+
+const SHELF_CATEGORIES = [
+  { id: 'all', label: '📦 All Hardware' },
+  { id: 'network', label: '🌐 Network Devices' },
+  { id: 'end', label: '💻 End Devices' },
+  { id: 'wireless', label: '📡 Wireless' },
+  { id: 'security', label: '🛡️ Security & WAN' },
+  { id: 'cables', label: '⚡ Connections' },
 ];
 
 const nodePositions = [
@@ -538,6 +552,38 @@ function Simulator() {
   const [linkDrag, setLinkDrag] = useState(null);
   const [pan, setPan] = useState(null);
 
+  // Canvas Sticky Notes
+  const [notes, setNotes] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('netwise.simulator.notes') || 'null');
+      return Array.isArray(saved) ? saved : [
+        { id: 1, x: 22, y: 18, text: 'VLAN 10 - Sales Subnet\n192.168.1.0/24', color: 'yellow' },
+      ];
+    } catch {
+      return [{ id: 1, x: 22, y: 18, text: 'VLAN 10 - Sales Subnet\n192.168.1.0/24', color: 'yellow' }];
+    }
+  });
+  const [noteDrag, setNoteDrag] = useState(null);
+
+  // Packet Tracer Bottom Equipment Shelf
+  const [activeShelfCategory, setActiveShelfCategory] = useState('all');
+  const [shelfCollapsed, setShelfCollapsed] = useState(false);
+
+  // Modals & Guided Tour
+  const [labBuilderOpen, setLabBuilderOpen] = useState(false);
+  const [tourOpen, setTourOpen] = useState(false);
+
+  // Spanning Tree Protocol calculation
+  const stpState = useMemo(() => calculateSpanningTree(nodes, links), [nodes, links]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('netwise.simulator.notes', JSON.stringify(notes));
+    } catch {
+      // Storage optional
+    }
+  }, [notes]);
+
   useEffect(() => {
     if (activeChallenge) return undefined;
     const timer = window.setTimeout(() => {
@@ -710,6 +756,21 @@ function Simulator() {
     event.currentTarget.setPointerCapture(event.pointerId);
   };
 
+  const handleNotePointerDown = (event, note) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setNoteDrag({
+      id: note.id,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      startLeft: note.x,
+      startTop: note.y,
+    });
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
   const handlePointerMove = (event) => {
     if (drag) {
       const rect = canvasRef.current.getBoundingClientRect();
@@ -725,6 +786,16 @@ function Simulator() {
       if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
         setDrag((d) => d && { ...d, moved: true });
       }
+      return;
+    }
+
+    if (noteDrag) {
+      const rect = canvasRef.current.getBoundingClientRect();
+      const dx = ((event.clientX - noteDrag.startX) / view.scale / rect.width) * 100;
+      const dy = ((event.clientY - noteDrag.startY) / view.scale / rect.height) * 100;
+      const nx = clamp(noteDrag.startLeft + dx, 2, 92);
+      const ny = clamp(noteDrag.startTop + dy, 2, 92);
+      setNotes((current) => current.map((n) => (n.id === noteDrag.id ? { ...n, x: nx, y: ny } : n)));
       return;
     }
 
@@ -750,6 +821,10 @@ function Simulator() {
       setDrag(null);
     }
 
+    if (noteDrag) {
+      setNoteDrag(null);
+    }
+
     if (linkDrag) {
       const point = { x: linkDrag.currentX, y: linkDrag.currentY };
       const hit = nodes.find((n) => (
@@ -766,6 +841,42 @@ function Simulator() {
     }
 
     if (pan) setPan(null);
+  };
+
+  const addNote = () => {
+    const newNote = {
+      id: Date.now(),
+      x: clamp(30 - view.x / 10, 8, 75),
+      y: clamp(25 - view.y / 10, 8, 75),
+      text: 'New Subnet Note',
+      color: 'yellow',
+    };
+    setNotes((prev) => [...prev, newNote]);
+    setSimMessage('Added sticky note to canvas.');
+  };
+
+  const updateNote = (id, field, value) => {
+    setNotes((prev) => prev.map((n) => (n.id === id ? { ...n, [field]: value } : n)));
+  };
+
+  const deleteNote = (id) => {
+    setNotes((prev) => prev.filter((n) => n.id !== id));
+  };
+
+  const startConnectModeWithCable = (cableId) => {
+    setConnectMode(true);
+    setConnectFromId(null);
+    setPendingCable(cableId || 'straightThrough');
+    const cableLabel = CABLE_TYPES[cableId]?.label || 'cable';
+    setSimMessage(`Connect Mode: Click first device, then second device (${cableLabel}).`);
+  };
+
+  const getFilteredDevices = (cat) => {
+    if (cat === 'network') return ['Router', 'Switch', 'L3Switch'];
+    if (cat === 'end') return ['PC', 'Server', 'WirelessClient'];
+    if (cat === 'wireless') return ['AccessPoint', 'WirelessClient'];
+    if (cat === 'security') return ['Firewall', 'Modem'];
+    return ['PC', 'Server', 'Switch', 'L3Switch', 'Router', 'Firewall', 'AccessPoint', 'WirelessClient', 'Modem'];
   };
 
   /* -------- Connect-mode click flow -------- */
@@ -853,17 +964,18 @@ function Simulator() {
       }));
     };
 
-    const newNodes = [
+    const placedNodes = [
       ...placeTier(tier1, 18),
       ...placeTier(tier2, 38),
       ...placeTier(tier3, 62),
       ...placeTier(tier4, 82),
     ];
+    const newNodes = calculateDynamicRoutes(placedNodes, links, 'OSPF');
 
     resetSimulation();
     setNodes(newNodes);
     pushState(newNodes, links);
-    setSimMessage('Canvas automatically organized by network layer.');
+    setSimMessage('Canvas automatically organized by network tier with OSPF routes.');
   };
 
   /* -------- Canvas pan/zoom -------- */
@@ -909,8 +1021,8 @@ function Simulator() {
   const handleCanvasPointerDown = (event) => {
     if (event.button !== 0) return;
     if (event.target !== canvasRef.current
-        && event.target.tagName !== 'svg'
-        && event.target.tagName !== 'line') return;
+      && event.target.tagName !== 'svg'
+      && event.target.tagName !== 'line') return;
     if (event.shiftKey) return;
 
     setPan({
@@ -938,13 +1050,13 @@ function Simulator() {
   };
 
   /* -------- CRUD -------- */
-  const addNodeOfType = (type) => {
-    if (nodes.length >= initialNodes.length + nodePositions.length + 5) {
+  const addNodeOfType = (type, customPos = null) => {
+    if (nodes.length >= initialNodes.length + nodePositions.length + 15) {
       setSimMessage('Your network canvas is full.');
       return;
     }
     const id = nextNodeId;
-    const position = nodePositions[(nodes.length - 2) % nodePositions.length] || { x: 50, y: 50 };
+    const position = customPos || nodePositions[(nodes.length - 2) % nodePositions.length] || { x: 50, y: 50 };
     const newDevice = makeDevice(type, id, position);
     resetSimulation();
     const updated = [...nodes, newDevice];
@@ -952,7 +1064,7 @@ function Simulator() {
     pushState(updated, links);
     setSelectedNodeId(id);
     setNextNodeId((current) => current + 1);
-    setSimMessage('');
+    setSimMessage(`Added ${newDevice.name} to workspace.`);
     setCatalogOpen(false);
   };
 
@@ -1057,6 +1169,81 @@ function Simulator() {
     a.click();
     URL.revokeObjectURL(url);
     setSimMessage('Packet capture exported as PCAP JSON.');
+  };
+
+  const exportDiagramSvg = () => {
+    const width = 1200;
+    const height = 800;
+    const linesSvg = links.map(({ from, to, cable }) => {
+      const fn = nodes.find((n) => n.id === from);
+      const tn = nodes.find((n) => n.id === to);
+      if (!fn || !tn) return '';
+      const x1 = (fn.x / 100) * width;
+      const y1 = (fn.y / 100) * height;
+      const x2 = (tn.x / 100) * width;
+      const y2 = (tn.y / 100) * height;
+      const color = CABLE_TYPES[cable || 'straightThrough']?.color || '#2b6cb0';
+      return `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${color}" stroke-width="3" stroke-linecap="round" />`;
+    }).join('\n');
+
+    const nodesSvg = nodes.map((node) => {
+      const cx = (node.x / 100) * width;
+      const cy = (node.y / 100) * height;
+      return `
+        <g transform="translate(${cx}, ${cy})">
+          <circle r="26" fill="#ffffff" stroke="#2563eb" stroke-width="2.5" />
+          <text y="-32" font-family="system-ui, sans-serif" font-size="13" font-weight="bold" text-anchor="middle" fill="#0f172a">${node.name}</text>
+          <text y="42" font-family="system-ui, sans-serif" font-size="11" text-anchor="middle" fill="#64748b">${node.ip || node.type}</text>
+        </g>
+      `;
+    }).join('\n');
+
+    const notesSvg = notes.map((note) => {
+      const nx = (note.x / 100) * width;
+      const ny = (note.y / 100) * height;
+      return `
+        <g transform="translate(${nx}, ${ny})">
+          <rect width="140" height="70" rx="6" fill="#fef08a" stroke="#eab308" stroke-width="1.5" />
+          <text x="10" y="24" font-family="system-ui, sans-serif" font-size="11" fill="#713f12">${(note.text || '').replace(/\n/g, ' ')}</text>
+        </g>
+      `;
+    }).join('\n');
+
+    const fullSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" style="background:#f8fafc;">
+      <defs>
+        <pattern id="grid" width="30" height="30" patternUnits="userSpaceOnUse">
+          <circle cx="2" cy="2" r="1.5" fill="#cbd5e1" />
+        </pattern>
+      </defs>
+      <rect width="100%" height="100%" fill="url(#grid)" />
+      <text x="30" y="40" font-family="system-ui, sans-serif" font-size="20" font-weight="bold" fill="#0f172a">Netwise Network Topology</text>
+      <text x="30" y="60" font-family="system-ui, sans-serif" font-size="12" fill="#64748b">Generated by Netwise Educational Simulator</text>
+      ${linesSvg}
+      ${nodesSvg}
+      ${notesSvg}
+    </svg>`;
+
+    const blob = new Blob([fullSvg], { type: 'image/svg+xml;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `netwise-topology-${Date.now()}.svg`;
+    a.click();
+    URL.revokeObjectURL(url);
+    setSimMessage('Exported network diagram as SVG.');
+  };
+
+  const exportCiscoConfigIos = (node) => {
+    if (!node) return;
+    const config = generateCiscoConfig(node);
+    const blob = new Blob([config], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${(node.name || 'device').replace(/\s+/g, '-').toLowerCase()}-running-config.ios`;
+    a.click();
+    URL.revokeObjectURL(url);
+    setSimMessage(`Exported Cisco configuration for ${node.name}.`);
   };
 
   const importTopology = (event) => {
@@ -1457,10 +1644,12 @@ function Simulator() {
   };
 
   const resetTerminalDevice = () => {
-    setTerminalLogs((prev) => ({ ...prev, [selectedNode.id]: [
-      `Netwise OS v1.5 [${selectedNode.name} - ${selectedNode.type}]`,
-      'Terminal reset. Type `help` to begin.',
-    ] }));
+    setTerminalLogs((prev) => ({
+      ...prev, [selectedNode.id]: [
+        `Netwise OS v1.5 [${selectedNode.name} - ${selectedNode.type}]`,
+        'Terminal reset. Type `help` to begin.',
+      ]
+    }));
     setTerminalModes((prev) => ({ ...prev, [selectedNode.id]: 'user' }));
     setTerminalInterfaces((prev) => ({ ...prev, [selectedNode.id]: '' }));
     setTerminalInput('');
@@ -1669,19 +1858,19 @@ function Simulator() {
 
   /* Filtered packet capture frames */
   const capturedFrames = trace.map((evt, idx) => ({
-      num: idx + 1,
-      time: (idx * 0.012).toFixed(3),
-      src: evt.packetDetails?.ip?.srcIp || evt.packetDetails?.frame?.srcMac || '0.0.0.0',
-      dst: evt.packetDetails?.ip?.dstIp || evt.packetDetails?.frame?.dstMac || '0.0.0.0',
-      protocol: evt.packetDetails?.transport?.type || (evt.packetDetails?.frame?.isArp ? 'ARP' : 'IPv4'),
-      length: evt.packetDetails?.frame?.length || '64',
-      info: evt.title + ' — ' + evt.description,
-      nodeId: evt.nodeId,
-    })).filter((f) => {
-      if (!packetFilter.trim()) return true;
-      const q = packetFilter.toLowerCase();
-      return f.protocol.toLowerCase().includes(q) || f.src.includes(q) || f.dst.includes(q) || f.info.toLowerCase().includes(q);
-    });
+    num: idx + 1,
+    time: (idx * 0.012).toFixed(3),
+    src: evt.packetDetails?.ip?.srcIp || evt.packetDetails?.frame?.srcMac || '0.0.0.0',
+    dst: evt.packetDetails?.ip?.dstIp || evt.packetDetails?.frame?.dstMac || '0.0.0.0',
+    protocol: evt.packetDetails?.transport?.type || (evt.packetDetails?.frame?.isArp ? 'ARP' : 'IPv4'),
+    length: evt.packetDetails?.frame?.length || '64',
+    info: evt.title + ' — ' + evt.description,
+    nodeId: evt.nodeId,
+  })).filter((f) => {
+    if (!packetFilter.trim()) return true;
+    const q = packetFilter.toLowerCase();
+    return f.protocol.toLowerCase().includes(q) || f.src.includes(q) || f.dst.includes(q) || f.info.toLowerCase().includes(q);
+  });
 
   /* -------- Render -------- */
   return (
@@ -1839,6 +2028,15 @@ function Simulator() {
           <button className="button button-secondary" type="button" onClick={exportTopology} title="Export topology as JSON">
             Export JSON
           </button>
+          <button className="button button-secondary" type="button" onClick={exportDiagramSvg} title="Export topology as SVG diagram">
+            📷 Diagram
+          </button>
+          <button className="button button-secondary" type="button" onClick={() => setLabBuilderOpen(true)} title="Open Custom Lab Scenario Builder">
+            🛠️ Lab Builder
+          </button>
+          <button className="button button-secondary" type="button" onClick={() => setTourOpen(true)} title="Start guided onboarding walkthrough">
+            ❓ Tour
+          </button>
           <label className="button button-secondary file-upload-btn" title="Import topology from JSON">
             Import JSON
             <input type="file" accept=".json" onChange={importTopology} style={{ display: 'none' }} />
@@ -1851,33 +2049,6 @@ function Simulator() {
       </div>
 
       <div className="simulator-workspace">
-        <aside className="device-palette" aria-label="Device palette">
-          <div className="device-palette-heading">
-            <h2>Devices</h2>
-            <span>{nodes.length} nodes</span>
-          </div>
-          <p className="device-palette-hint">Click a device to add it</p>
-          {DEVICE_CATALOG.map((section) => (
-            <div key={section.group} className="palette-section">
-              <p>{section.group}</p>
-              <div className="palette-items">
-                {section.items.map((type) => (
-                  <button
-                    key={type}
-                    className="palette-device"
-                    type="button"
-                    onClick={() => addNodeOfType(type)}
-                    disabled={nodes.length >= initialNodes.length + nodePositions.length + 5}
-                  >
-                    <span className="node-symbol"><DeviceIcon type={type} /></span>
-                    <span>{type}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          ))}
-        </aside>
-
         <div className="simulator-main-column">
           <section
             ref={canvasRef}
@@ -1888,6 +2059,18 @@ function Simulator() {
             onPointerMove={handlePointerMove}
             onPointerUp={handlePointerUp}
             onWheel={handleWheel}
+            onDragOver={(e) => {
+              e.preventDefault();
+              e.dataTransfer.dropEffect = 'copy';
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              const type = e.dataTransfer.getData('text/plain');
+              if (type) {
+                const point = toCanvasPercent(e.clientX, e.clientY);
+                addNodeOfType(type, point);
+              }
+            }}
           >
             <div className="canvas-header">
               <span className="canvas-tag">INTERACTIVE TOPOLOGY</span>
@@ -1895,6 +2078,7 @@ function Simulator() {
             </div>
 
             <div className="canvas-controls" aria-label="Canvas controls">
+              <button type="button" onClick={addNote} aria-label="Add sticky note" title="Add Sticky Note to canvas">📝 +Note</button>
               <button type="button" onClick={() => zoomBy(1.2)} aria-label="Zoom in" title="Zoom in">+</button>
               <span aria-live="polite">{Math.round(view.scale * 100)}%</span>
               <button type="button" onClick={() => zoomBy(1 / 1.2)} aria-label="Zoom out" title="Zoom out">−</button>
@@ -1946,9 +2130,19 @@ function Simulator() {
                     console: '1 1',
                   }[cableType];
 
-                  // LED status calculations
+                  // LED & STP status calculations
                   const mismatchErr = validateCable(fromNode, toNode, cableType);
-                  const ledColor = mismatchErr ? '#ef4444' : '#22c55e';
+                  const linkKey = `${Math.min(from, to)}-${Math.max(from, to)}`;
+                  const isStpBlocking = stpState.linkStates?.[linkKey] === 'blocking';
+                  const isStpForwarding = stpState.linkStates?.[linkKey] === 'forwarding';
+                  const ledColor = mismatchErr ? '#ef4444' : isStpBlocking ? '#f59e0b' : '#22c55e';
+                  const ledTitle = mismatchErr
+                    ? 'Cable Mismatch'
+                    : isStpBlocking
+                      ? 'STP: Blocking (Loop Avoidance)'
+                      : isStpForwarding
+                        ? 'STP: Forwarding'
+                        : 'Link Connected';
 
                   return (
                     <g key={`${from}-${to}`} className={isActiveLink ? 'link-active' : ''}>
@@ -1960,10 +2154,10 @@ function Simulator() {
                       <line
                         x1={fromNode.x} y1={fromNode.y}
                         x2={toNode.x} y2={toNode.y}
-                        className={`connection-line${isActiveLink ? ' is-active' : ''}`}
-                        stroke={isActiveLink ? '#10b981' : cableDef.color}
-                        strokeWidth={isActiveLink ? '0.95' : '0.65'}
-                        strokeDasharray={cableDash}
+                        className={`connection-line${isActiveLink ? ' is-active' : ''}${isStpBlocking ? ' is-blocking' : ''}`}
+                        stroke={isActiveLink ? '#10b981' : isStpBlocking ? '#f59e0b' : cableDef.color}
+                        strokeWidth={isActiveLink ? '0.95' : isStpBlocking ? '0.6' : '0.65'}
+                        strokeDasharray={isStpBlocking ? '1.5 1.5' : cableDash}
                         strokeLinecap="round"
                       />
 
@@ -1971,17 +2165,28 @@ function Simulator() {
                       <circle
                         cx={fromNode.x + (toNode.x - fromNode.x) * 0.12}
                         cy={fromNode.y + (toNode.y - fromNode.y) * 0.12}
-                        r="0.8"
+                        r={isStpBlocking ? '1.0' : '0.8'}
                         fill={ledColor}
-                        className="link-led"
-                      />
+                        className={`link-led${isStpBlocking ? ' is-blocking' : ''}`}
+                      >
+                        <title>{ledTitle}</title>
+                      </circle>
                       <circle
                         cx={toNode.x + (fromNode.x - toNode.x) * 0.12}
                         cy={toNode.y + (fromNode.y - toNode.y) * 0.12}
-                        r="0.8"
+                        r={isStpBlocking ? '1.0' : '0.8'}
                         fill={ledColor}
-                        className="link-led"
-                      />
+                        className={`link-led${isStpBlocking ? ' is-blocking' : ''}`}
+                      >
+                        <title>{ledTitle}</title>
+                      </circle>
+
+                      {isStpBlocking && (
+                        <g transform={`translate(${mx}, ${my - 1.8})`}>
+                          <rect x="-6" y="-1.8" width="12" height="3.6" rx="1.8" fill="#78350f" fillOpacity="0.85" />
+                          <text x="0" y="0.8" fill="#fef3c7" fontSize="1.8" fontWeight="bold" textAnchor="middle">STP BLK</text>
+                        </g>
+                      )}
 
                       {/* Animated traveling wire packet pulse */}
                       {isActiveLink && (
@@ -2065,6 +2270,53 @@ function Simulator() {
                   aria-label={isDelivered ? 'Packet delivered' : 'Packet in transit'}
                 />
               )}
+
+              {/* Canvas Sticky Notes */}
+              {notes.map((note) => (
+                <div
+                  key={note.id}
+                  className={`canvas-note color-${note.color || 'yellow'}`}
+                  style={{ left: `${note.x}%`, top: `${note.y}%` }}
+                  onPointerDown={(e) => handleNotePointerDown(e, note)}
+                >
+                  <div className="note-header">
+                    <div className="note-colors">
+                      {['yellow', 'blue', 'green', 'pink', 'purple'].map((c) => (
+                        <button
+                          key={c}
+                          type="button"
+                          className={`note-color-dot ${c}${note.color === c ? ' is-active' : ''}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            updateNote(note.id, 'color', c);
+                          }}
+                          aria-label={`Change note color to ${c}`}
+                        />
+                      ))}
+                    </div>
+                    <button
+                      type="button"
+                      className="note-del-btn"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        deleteNote(note.id);
+                      }}
+                      title="Delete note"
+                      aria-label="Delete note"
+                    >
+                      ×
+                    </button>
+                  </div>
+                  <textarea
+                    className="note-textarea"
+                    value={note.text}
+                    onChange={(e) => updateNote(note.id, 'text', e.target.value)}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    placeholder="Note or subnet..."
+                    rows={2}
+                  />
+                </div>
+              ))}
             </div>
 
             <div className="canvas-hint" aria-hidden="true">
@@ -2074,6 +2326,98 @@ function Simulator() {
                   : 'Drag nodes to reposition • Shift+Drag from node to connect • Scroll to zoom'}
               </span>
             </div>
+          </section>
+
+          {/* Packet Tracer Bottom Equipment Shelf */}
+          <section className="pt-bottom-device-shelf" aria-label="Packet Tracer Equipment Shelf">
+            <div className="shelf-header">
+              <div className="shelf-tabs">
+                {SHELF_CATEGORIES.map((cat) => (
+                  <button
+                    key={cat.id}
+                    type="button"
+                    className={`shelf-tab-btn ${activeShelfCategory === cat.id ? 'is-active' : ''}`}
+                    onClick={() => setActiveShelfCategory(cat.id)}
+                  >
+                    {cat.label}
+                  </button>
+                ))}
+              </div>
+              <div className="shelf-header-actions">
+                <span className="shelf-drag-hint">💡 Drag onto canvas or click to add</span>
+                <button
+                  type="button"
+                  className="shelf-collapse-toggle"
+                  onClick={() => setShelfCollapsed((c) => !c)}
+                  title={shelfCollapsed ? 'Expand equipment shelf' : 'Collapse equipment shelf'}
+                >
+                  {shelfCollapsed ? '▲ Show Equipment Shelf' : '▼ Hide Shelf'}
+                </button>
+              </div>
+            </div>
+
+            {!shelfCollapsed && (
+              <div className="shelf-body">
+                <div className="shelf-items-rack">
+                  {/* If not cables, show devices */}
+                  {activeShelfCategory !== 'cables' && (
+                    <>
+                      {getFilteredDevices(activeShelfCategory).map((type) => (
+                        <div
+                          key={type}
+                          className="shelf-device-card"
+                          draggable="true"
+                          onDragStart={(e) => {
+                            e.dataTransfer.setData('text/plain', type);
+                            e.dataTransfer.effectAllowed = 'copy';
+                          }}
+                          onClick={() => addNodeOfType(type)}
+                          title={`Click or drag ${type} to canvas`}
+                          role="button"
+                          tabIndex={0}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              addNodeOfType(type);
+                            }
+                          }}
+                        >
+                          <span className="shelf-icon"><DeviceIcon type={type} /></span>
+                          <span className="shelf-name">{type}</span>
+                        </div>
+                      ))}
+                    </>
+                  )}
+
+                  {/* If cables or all, show cables */}
+                  {(activeShelfCategory === 'cables' || activeShelfCategory === 'all') && (
+                    <>
+                      {Object.values(CABLE_TYPES).map((cable) => (
+                        <div
+                          key={cable.id}
+                          className={`shelf-device-card shelf-cable-card ${connectMode && pendingCable === cable.id ? 'is-active' : ''}`}
+                          onClick={() => startConnectModeWithCable(cable.id)}
+                          title={`${cable.label} - ${cable.description}. Click to activate Connect Mode.`}
+                          role="button"
+                          tabIndex={0}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              startConnectModeWithCable(cable.id);
+                            }
+                          }}
+                        >
+                          <span className="shelf-icon cable-icon" style={{ borderColor: cable.color }}>
+                            ⚡
+                          </span>
+                          <span className="shelf-name">{cable.label.split(' ')[0]}</span>
+                        </div>
+                      ))}
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
           </section>
 
           {/* Wireshark-Lite Live Packet Capture Drawer */}
@@ -2413,6 +2757,14 @@ function Simulator() {
 
                   <div className="inspector-actions">
                     <button
+                      className="button button-secondary"
+                      type="button"
+                      onClick={() => exportCiscoConfigIos(selectedNode)}
+                      title="Export Cisco IOS running-config (.ios)"
+                    >
+                      📄 Export Cisco Config (.ios)
+                    </button>
+                    <button
                       className="button button-secondary danger"
                       type="button"
                       onClick={() => deleteNode(selectedNode.id)}
@@ -2442,6 +2794,7 @@ function Simulator() {
                     >
                       ⌘ Commands
                     </button>
+                    <button type="button" className="terminal-action-btn" onClick={() => exportCiscoConfigIos(selectedNode)} title="Export Cisco IOS running configuration">Export .ios</button>
                     <button type="button" className="terminal-action-btn" onClick={copyTerminalOutput} title="Copy terminal output">Copy</button>
                     <button type="button" className="terminal-action-btn" onClick={downloadTerminalOutput} title="Download terminal output">Download</button>
                     <button type="button" className="terminal-action-btn" onClick={clearTerminalOutput} title="Clear terminal output">Clear</button>
@@ -2809,7 +3162,7 @@ function Simulator() {
               /* Hex Dump View */
               <div className="inspector-hexdump-view">
                 <pre className="hexdump-code">
-{`0000   02 00 00 00 00 21 aa bb  cc 00 00 01 08 00 45 00   .....!........E.
+                  {`0000   02 00 00 00 00 21 aa bb  cc 00 00 01 08 00 45 00   .....!........E.
 0010   00 3c 1c 3a 00 00 08 01  3a 4b c0 a8 01 04 5d b8   .<.:....:K....].
 0020   d8 22 08 00 4d 5b 00 01  00 01 61 62 63 64 65 66   ."..M[....abcdef
 0030   67 68 69 6a 6b 6c 6d 6e  6f 70 71 72 73 74 75 76   ghijklmnopqrstuv
@@ -2826,6 +3179,29 @@ function Simulator() {
           </div>
         </div>
       )}
+
+      {/* Lab Scenario Builder Modal */}
+      <LabBuilderModal
+        isOpen={labBuilderOpen}
+        onClose={() => setLabBuilderOpen(false)}
+        nodes={nodes}
+        links={links}
+        onLoadLab={(lab) => {
+          resetSimulation();
+          if (lab.starterNodes) setNodes(lab.starterNodes);
+          if (lab.starterLinks) setLinks(lab.starterLinks);
+          if (lab.targetSourceId) setSourceId(lab.targetSourceId);
+          if (lab.targetDestId) setDestinationId(lab.targetDestId);
+          setSimMessage(`Loaded lab scenario: ${lab.title}`);
+          setLabBuilderOpen(false);
+        }}
+      />
+
+      {/* Interactive Walkthrough Tour */}
+      <WalkthroughTour
+        isOpen={tourOpen}
+        onClose={() => setTourOpen(false)}
+      />
     </section>
   );
 }

@@ -197,6 +197,7 @@ function About() {
           <p>Small shortcuts make it easier to build and inspect bigger networks.</p>
         </div>
         <ul className="tips-list">
+
           <li><span className="tip-number">01</span><p><strong>Connect devices</strong>Hold <kbd>Shift</kbd> and drag between devices to draw a connection.</p></li>
           <li><span className="tip-number">02</span><p><strong>Move around</strong>Use <kbd>Ctrl</kbd> + scroll to zoom, or drag empty canvas space to pan.</p></li>
           <li><span className="tip-number">03</span><p><strong>Configure a device</strong>Select a device to edit its IP address, prefix length, and gateway.</p></li>
@@ -204,6 +205,7 @@ function About() {
         </ul>
       </section>
     </section>
+
   );
 }
 
