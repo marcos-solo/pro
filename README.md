@@ -1,16 +1,48 @@
-# React + Vite
+# Netwise
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+Netwise is an interactive, browser-only computer networking learning app. It combines visual lessons, quizzes, troubleshooting labs, a packet-routing simulator, and subnet planning tools.
 
-Currently, two official plugins are available:
+## Features
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- 8 visual networking lessons with searchable content and quizzes
+- 8 troubleshooting challenges with simulator integration
+- Undo/redo, topology presets, autosave, saved topologies, and JSON import/export
+- PCAP-style packet capture export
+- Interactive device terminals with per-device command history, Tab completion, privilege modes,
+  PC/switch/router/firewall commands, persistent IP/routes/VLAN/rule configuration, and CLI challenge checks
+- Terminal command palette, inline hints, typo suggestions, structured output, copy/download actions,
+  clickable IP values, and capture start/stop/show controls
+- Learning XP, streaks, ranks, and challenge progress stored locally
+- CIDR, VLSM, route summarization, and IPv6 tools
+- Dark and light themes
+- Responsive, keyboard-accessible interface
 
-## React Compiler
+## Development
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+```powershell
+npm.cmd install
+npm.cmd run dev
+```
 
-## Expanding the Oxlint configuration
+Open the local URL printed by Vite.
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+## Validation
+
+```powershell
+npm.cmd test
+npm.cmd run lint
+npm.cmd run build
+```
+
+## Project structure
+
+- `src/App.jsx` - application shell and routing
+- `src/Learn.jsx` - lessons and quizzes
+- `src/Challenges.jsx` - troubleshooting labs
+- `src/Simulator.jsx` - interactive topology and packet simulator
+- `src/SubnetCalculator.jsx` - IP and subnet planning tools
+- `src/networkEngine.js` - packet, subnet, DHCP, DNS, and IPv6 calculations
+- `src/progressStore.js` - local XP, streak, lesson, and challenge persistence
+- `test/` - Node networking-engine tests
+
+No backend or account is required. User progress and saved topologies remain in browser storage.

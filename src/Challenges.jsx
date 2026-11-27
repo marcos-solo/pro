@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { simulatePacket } from './networkEngine.js';
+import { loadProfile, saveProfile } from './progressStore.js';
 
 const CHALLENGES = [
   {
@@ -307,6 +308,7 @@ function Challenges() {
   const [showHint, setShowHint] = useState(false);
   const [certificateOpen, setCertificateOpen] = useState(false);
   const [userName, setUserName] = useState('Network Engineer');
+  const [profile] = useState(loadProfile);
 
   const currentChallenge = CHALLENGES[activeIdx];
   const isSolved = solved.includes(currentChallenge.id);
@@ -316,6 +318,11 @@ function Challenges() {
     window.addEventListener('storage', handleStorage);
     return () => window.removeEventListener('storage', handleStorage);
   }, []);
+
+  useEffect(() => {
+    saveProfile(profile);
+  }, [profile]);
+
 
   const handleLaunchInSimulator = (challenge) => {
     sessionStorage.setItem('netwise.simulator.loadChallenge', JSON.stringify({

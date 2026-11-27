@@ -1,6 +1,7 @@
 // Web Audio API sound generator - zero dependencies, synthesized in-browser
 
 let audioCtx = null;
+let masterGain = null;
 let soundEnabled = true;
 
 try {
@@ -18,12 +19,50 @@ function getAudioContext() {
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
     if (AudioContextClass) {
       audioCtx = new AudioContextClass();
+      masterGain = audioCtx.createGain();
+      masterGain.gain.setValueAtTime(1.0, audioCtx.currentTime);
+      masterGain.connect(audioCtx.destination);
     }
   }
   if (audioCtx && audioCtx.state === 'suspended') {
-    audioCtx.resume().catch(() => {});
+    audioCtx.resume().catch(() => {
+      // Browsers may keep the context suspended until a later user gesture.
+    });
   }
   return audioCtx;
+}
+
+function connectOutput(osc, gain) {
+  osc.connect(gain);
+  gain.connect(masterGain || audioCtx.destination);
+}
+
+function scheduleTone({ frequency, endFrequency = frequency, start, duration, volume = 0.12, type = 'sine' }) {
+  const ctx = getAudioContext();
+  if (!ctx) return;
+
+  try {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    const startTime = start ?? ctx.currentTime;
+
+    osc.type = type;
+    osc.frequency.setValueAtTime(frequency, startTime);
+    if (endFrequency !== frequency) {
+      osc.frequency.exponentialRampToValueAtTime(endFrequency, startTime + duration);
+    }
+
+    gain.gain.setValueAtTime(0.001, startTime);
+    gain.gain.exponentialRampToValueAtTime(volume, startTime + 0.025);
+    gain.gain.setValueAtTime(volume, startTime + Math.max(0.025, duration - 0.08));
+    gain.gain.exponentialRampToValueAtTime(0.001, startTime + duration);
+
+    connectOutput(osc, gain);
+    osc.start(startTime);
+    osc.stop(startTime + duration);
+  } catch {
+    // Ignore unsupported or interrupted Web Audio operations.
+  }
 }
 
 export function isSoundEnabled() {
@@ -45,6 +84,7 @@ export function toggleSound() {
   const next = !soundEnabled;
   setSoundEnabled(next);
   if (next) {
+    getAudioContext();
     playChirp();
   }
   return next;
@@ -54,27 +94,7 @@ export function playPacketHop() {
   if (!soundEnabled) return;
   const ctx = getAudioContext();
   if (!ctx) return;
-
-  try {
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    const now = ctx.currentTime;
-
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(440, now);
-    osc.frequency.exponentialRampToValueAtTime(660, now + 0.08);
-
-    gain.gain.setValueAtTime(0.08, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
-
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-
-    osc.start(now);
-    osc.stop(now + 0.08);
-  } catch {
-    // Audio context error handling
-  }
+  scheduleTone({ frequency: 440, endFrequency: 660, start: ctx.currentTime, duration: 0.14, volume: 0.18 });
 }
 
 export function playPingSuccess() {
@@ -82,80 +102,28 @@ export function playPingSuccess() {
   const ctx = getAudioContext();
   if (!ctx) return;
 
-  try {
-    const now = ctx.currentTime;
-    [587.33, 880].forEach((freq, index) => {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      const startTime = now + index * 0.09;
-
-      osc.type = 'triangle';
-      osc.frequency.setValueAtTime(freq, startTime);
-
-      gain.gain.setValueAtTime(0.1, startTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, startTime + 0.18);
-
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-
-      osc.start(startTime);
-      osc.stop(startTime + 0.18);
+  const now = ctx.currentTime;
+  [523.25, 659.25, 783.99, 1046.5].forEach((frequency, index) => {
+    scheduleTone({
+      frequency,
+      start: now + index * 0.12,
+      duration: 0.32,
+      volume: 0.22,
+      type: 'triangle',
     });
-  } catch {
-    // Audio context error handling
-  }
+  });
 }
 
 export function playPacketDrop() {
   if (!soundEnabled) return;
   const ctx = getAudioContext();
   if (!ctx) return;
-
-  try {
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    const now = ctx.currentTime;
-
-    osc.type = 'sawtooth';
-    osc.frequency.setValueAtTime(220, now);
-    osc.frequency.exponentialRampToValueAtTime(110, now + 0.18);
-
-    gain.gain.setValueAtTime(0.12, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
-
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-
-    osc.start(now);
-    osc.stop(now + 0.18);
-  } catch {
-    // Audio context error handling
-  }
+  scheduleTone({ frequency: 220, endFrequency: 98, start: ctx.currentTime, duration: 0.38, volume: 0.2, type: 'sawtooth' });
 }
 
 export function playChirp() {
   if (!soundEnabled) return;
   const ctx = getAudioContext();
   if (!ctx) return;
-
-  try {
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    const now = ctx.currentTime;
-
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(700, now);
-    osc.frequency.exponentialRampToValueAtTime(900, now + 0.05);
-
-    gain.gain.setValueAtTime(0.06, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
-
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-
-    osc.start(now);
-    osc.stop(now + 0.05);
-  } catch {
-    // Audio context error handling
-  }
+  scheduleTone({ frequency: 700, endFrequency: 1050, start: ctx.currentTime, duration: 0.22, volume: 0.18, type: 'sine' });
 }

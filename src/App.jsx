@@ -5,6 +5,7 @@ import Learn from './Learn.jsx';
 import Simulator from './Simulator.jsx';
 import SubnetCalculator from './SubnetCalculator.jsx';
 import { isSoundEnabled, toggleSound } from './soundEngine.js';
+import { loadProfile } from './progressStore.js';
 import './my.css';
 
 const pagePaths = {
@@ -222,6 +223,23 @@ function App() {
 }
 
 function HomePage() {
+  const profile = loadProfile();
+  const lessonProgress = profile.completedLessons.length;
+  const challengeProgress = profile.solvedChallenges.length;
+  const weakLesson = Object.entries(profile.quizScores).find(([, correct]) => !correct)?.[0];
+  const recommendedHref = weakLesson
+    ? `/learn?lesson=${encodeURIComponent(weakLesson)}`
+    : lessonProgress < 8
+      ? '/learn'
+      : challengeProgress < 8
+        ? '/challenges'
+        : '/simulator';
+  const rank = (profile.xp || 0) >= 500
+    ? 'Network Specialist'
+    : (profile.xp || 0) >= 200
+      ? 'Network Explorer'
+      : 'New Learner';
+
   return (
     <>
       <section className="home-hero">
@@ -236,6 +254,25 @@ function HomePage() {
           <div className="hero-note"><span aria-hidden="true">✳</span> Free to explore. 100% in-browser, no setup required.</div>
         </div>
         <NetworkPreview />
+      </section>
+
+      <section className="home-progress-dashboard" aria-label="Your learning progress">
+        <div>
+          <span className="dashboard-kicker">YOUR JOURNEY</span>
+          <strong>{rank}</strong>
+          <small>{profile.xp || 0} XP · {profile.streak || 0} day streak</small>
+        </div>
+        <div className="dashboard-metric">
+          <strong>{lessonProgress}/8</strong>
+          <span>Lessons</span>
+        </div>
+        <div className="dashboard-metric">
+          <strong>{challengeProgress}/8</strong>
+          <span>Labs solved</span>
+        </div>
+        <a className="button button-secondary" href={recommendedHref}>
+          Continue learning <span aria-hidden="true">→</span>
+        </a>
       </section>
 
       {/* Feature Pillars */}

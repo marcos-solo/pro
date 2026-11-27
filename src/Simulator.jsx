@@ -15,6 +15,20 @@ import {
   playPingSuccess,
   toggleSound,
 } from './soundEngine.js';
+import {
+  loadProfile,
+  markChallengeSolved,
+  recordChallengeAttempt,
+  saveProfile,
+} from './progressStore.js';
+import {
+  applyTerminalConfiguration,
+  completeTerminalInput,
+  parseCommandLine,
+  suggestCommand,
+  terminalPrompt,
+  getDeviceCommands,
+} from './terminalEngine.js';
 
 /* ------------------------------------------------------------------ */
 /*  Device catalog & initial topologies                                */
@@ -437,10 +451,20 @@ function getInitialChallengeState() {
   return null;
 }
 
+function loadSimulatorAutosave() {
+  try {
+    const saved = JSON.parse(localStorage.getItem('netwise.simulator.autosave') || 'null');
+    return saved && Array.isArray(saved.nodes) && Array.isArray(saved.links) ? saved : null;
+  } catch {
+    return null;
+  }
+}
+
 function Simulator() {
   const [initChallenge] = useState(getInitialChallengeState);
-  const [nodes, setNodes] = useState(() => initChallenge?.nodes ?? initialNodes);
-  const [links, setLinks] = useState(() => initChallenge?.links ?? initialLinks);
+  const [autosave] = useState(loadSimulatorAutosave);
+  const [nodes, setNodes] = useState(() => initChallenge?.nodes ?? autosave?.nodes ?? initialNodes);
+  const [links, setLinks] = useState(() => initChallenge?.links ?? autosave?.links ?? initialLinks);
   const [nextNodeId, setNextNodeId] = useState(() => (initChallenge ? 12 : 9));
   const [selectedNodeId, setSelectedNodeId] = useState(() => initChallenge?.sourceId ?? 1);
   const [sourceId, setSourceId] = useState(() => initChallenge?.sourceId ?? 1);
@@ -465,8 +489,19 @@ function Simulator() {
   const [terminalLogs, setTerminalLogs] = useState({});
   const [terminalInput, setTerminalInput] = useState('');
   const [terminalExpanded, setTerminalExpanded] = useState(false);
-  const [cmdHistory, setCmdHistory] = useState([]);
-  const [historyPointer, setHistoryPointer] = useState(-1);
+  const [terminalModes, setTerminalModes] = useState({});
+  const [terminalInterfaces, setTerminalInterfaces] = useState({});
+  const [terminalHistories, setTerminalHistories] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('netwise.terminal.histories') || '{}');
+      return saved && typeof saved === 'object' ? saved : {};
+    } catch {
+      return {};
+    }
+  });
+  const [terminalHistoryPointers, setTerminalHistoryPointers] = useState({});
+  const [terminalPaletteOpen, setTerminalPaletteOpen] = useState(false);
+  const [isCapturing, setIsCapturing] = useState(false);
 
   // Modals & Panels
   const [pendingConnect, setPendingConnect] = useState(null);
@@ -482,6 +517,15 @@ function Simulator() {
   const [activeChallenge, setActiveChallenge] = useState(() => initChallenge?.challenge ?? null);
   const [challengeSolvedMsg, setChallengeSolvedMsg] = useState('');
   const [challengeErrorMsg, setChallengeErrorMsg] = useState('');
+  const [challengeHintVisible, setChallengeHintVisible] = useState(false);
+  const [customTopologies, setCustomTopologies] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('netwise.simulator.savedTopologies') || '[]');
+      return Array.isArray(saved) ? saved : [];
+    } catch {
+      return [];
+    }
+  });
 
   // Canvas transform
   const canvasRef = useRef(null);
@@ -493,6 +537,24 @@ function Simulator() {
   const [drag, setDrag] = useState(null);
   const [linkDrag, setLinkDrag] = useState(null);
   const [pan, setPan] = useState(null);
+
+  useEffect(() => {
+    if (activeChallenge) return undefined;
+    const timer = window.setTimeout(() => {
+      try {
+        localStorage.setItem('netwise.simulator.autosave', JSON.stringify({
+          nodes,
+          links,
+          sourceId,
+          destinationId,
+          savedAt: new Date().toISOString(),
+        }));
+      } catch {
+        // Autosave is optional when browser storage is unavailable.
+      }
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [nodes, links, sourceId, destinationId, activeChallenge]);
 
   const pushState = (newNodes, newLinks) => {
     const updatedHistory = history.slice(0, historyIdx + 1);
@@ -922,6 +984,43 @@ function Simulator() {
   };
 
   /* -------- Export / Import -------- */
+  const saveCustomTopology = () => {
+    const name = window.prompt('Name this topology', 'My network');
+    if (!name?.trim()) return;
+    const savedTopology = {
+      id: `topology-${Date.now()}`,
+      name: name.trim(),
+      nodes,
+      links,
+      sourceId,
+      destinationId,
+      savedAt: new Date().toISOString(),
+    };
+    const next = [savedTopology, ...customTopologies].slice(0, 12);
+    setCustomTopologies(next);
+    try {
+      localStorage.setItem('netwise.simulator.savedTopologies', JSON.stringify(next));
+    } catch {
+      setSimMessage('Topology could not be saved to browser storage.');
+      return;
+    }
+    setSimMessage(`Saved topology: ${savedTopology.name}`);
+  };
+
+  const loadCustomTopology = (id) => {
+    const saved = customTopologies.find((topology) => topology.id === id);
+    if (!saved) return;
+    resetSimulation();
+    setNodes(saved.nodes);
+    setLinks(saved.links);
+    pushState(saved.nodes, saved.links);
+    setSourceId(saved.sourceId);
+    setDestinationId(saved.destinationId);
+    setSelectedNodeId(saved.sourceId);
+    setActiveChallenge(null);
+    setSimMessage(`Loaded topology: ${saved.name}`);
+  };
+
   const exportTopology = () => {
     const data = JSON.stringify({ nodes, links, sourceId, destinationId }, null, 2);
     const blob = new Blob([data], { type: 'application/json' });
@@ -992,35 +1091,50 @@ function Simulator() {
     const trimmed = cmdText.trim();
     if (!trimmed) return;
 
-    // Save in command history
-    setCmdHistory((prev) => [...prev, trimmed]);
-    setHistoryPointer(-1);
-
     const devId = selectedNode.id;
+    const mode = terminalModes[devId] || 'user';
+    const interfaceName = terminalInterfaces[devId] || '';
+    const parts = parseCommandLine(trimmed);
+    if (!parts.length) return;
+    const cmd = parts[0].toLowerCase();
+    const args = parts.slice(1);
+
+    const previousHistory = (terminalHistories[devId] || []).filter((entry) => entry !== trimmed);
+    const nextHistory = [...previousHistory, trimmed];
+    const updatedHistories = { ...terminalHistories, [devId]: nextHistory.slice(-100) };
+    setTerminalHistories(updatedHistories);
+    setTerminalHistoryPointers((prev) => ({ ...prev, [devId]: -1 }));
+    try {
+      localStorage.setItem('netwise.terminal.histories', JSON.stringify(updatedHistories));
+    } catch {
+      /* Storage is optional. */
+    }
+
     const currentLogs = terminalLogs[devId] || [
       `Netwise OS v1.5 [${selectedNode.name} - ${selectedNode.type}]`,
       `Type 'help' for network commands (ping, traceroute, curl, nslookup, ipconfig, arp -a).`,
     ];
-
-    const parts = trimmed.split(/\s+/);
-    const cmd = parts[0].toLowerCase();
-    const arg = parts[1];
-
+    const normalizeLog = (line) => (typeof line === 'string' ? { kind: 'output', text: line } : line);
     let output = [];
+
+    const appendCommand = (lines) => {
+      setTerminalLogs((prev) => ({
+        ...prev,
+        [devId]: [
+          ...(prev[devId] || currentLogs),
+          { kind: 'command', text: `${terminalPrompt(selectedNode, mode, interfaceName)}${trimmed}` },
+          ...lines.map(normalizeLog),
+        ],
+      }));
+    };
 
     switch (cmd) {
       case 'help':
         output = [
-          'Available Commands:',
-          '  ping <ip>            - Send ICMP Echo Requests',
-          '  traceroute <ip>      - Trace router hops and latency (alias: tracert)',
-          '  curl <url/domain>    - Send HTTP GET request to web server',
-          '  nslookup <domain>    - Query DNS server for domain IP',
-          '  ipconfig [/renew]    - Display or renew DHCP IP lease (alias: ifconfig)',
-          '  arp -a               - Display ARP address resolution table',
-          '  route print          - Display IPv4 routing table',
-          '  nat show             - Display active NAT table translations',
-          '  clear                - Clear console output',
+          'Available commands:',
+          ...getDeviceCommands(selectedNode, mode).map((command) => `  ${command}`),
+          '',
+          'Tutorial: try `enable`, `configure terminal`, `interface <name>`, then `ip address <ip>/<prefix>`.',
         ];
         break;
 
@@ -1029,38 +1143,103 @@ function Simulator() {
         setTerminalInput('');
         return;
 
+      case 'enable':
+      case 'disable':
+      case 'configure':
+      case 'interface':
+      case 'exit':
+      case 'end':
+      case 'shutdown':
+      case 'no':
+      case 'ip':
+      case 'set':
+      case 'vlan':
+      case 'rule':
+      case 'access-list': {
+        const result = applyTerminalConfiguration({ nodes, nodeId: devId, mode, interfaceName, parts });
+        setTerminalModes((prev) => ({ ...prev, [devId]: result.mode }));
+        setTerminalInterfaces((prev) => ({ ...prev, [devId]: result.interfaceName }));
+        if (result.changed) {
+          setNodes(result.nodes);
+          pushState(result.nodes, links);
+          checkChallengeSolutionForNodes(result.nodes);
+        }
+        output = result.output;
+        break;
+      }
+
+      case 'capture':
+        if (args[0] === 'start') {
+          setIsCapturing(true);
+          setShowWireshark(true);
+          output = [{ kind: 'success', text: 'Packet capture started. Opening live capture view.' }];
+        } else if (args[0] === 'stop') {
+          setIsCapturing(false);
+          output = [{ kind: 'warning', text: 'Packet capture stopped.' }];
+        } else if (args[0] === 'show') {
+          setShowWireshark(true);
+          output = [{ kind: 'info', text: `Packet capture view opened (${capturedFrames.length} frames).` }];
+        } else {
+          output = ['Usage: capture start | capture stop | capture show'];
+        }
+        break;
+
+      case 'show': {
+        const topic = args.join(' ').toLowerCase();
+        if (topic === 'running-config') {
+          output = [
+            `! ${selectedNode.name} running configuration`,
+            `hostname ${selectedNode.name.replace(/\s+/g, '-')}`,
+            ...((selectedNode.interfaces || []).map((intf) => `interface ${intf.name || 'eth0'}\n ip address ${intf.ip || '0.0.0.0'} ${intf.prefixLength || 24}\n ${intf.enabled === false ? 'shutdown' : 'no shutdown'}`)),
+            ...(selectedNode.vlans || []).map((vlan) => `vlan ${vlan.id}\n name ${vlan.name}`),
+            ...(selectedNode.routes || []).map((route) => `ip route ${route.network} ${route.prefixLength || 24} ${route.nextHop}`),
+            ...(selectedNode.rules || []).map((rule) => `access-list ${rule.action} ${rule.targetIp}${rule.port ? ` port ${rule.port}` : ''}`),
+          ];
+        } else if (topic === 'ip route') {
+          output = ['IPv4 Route Table:', 'Network        Prefix  Next Hop'];
+          ((selectedNode.routes || []).forEach((route) => output.push(`${route.network.padEnd(14)} ${String(route.prefixLength || 24).padEnd(7)} ${route.nextHop}`)));
+        } else if (topic === 'vlan') {
+          output = ['VLAN   Name', ...((selectedNode.vlans || []).map((vlan) => `${String(vlan.id).padEnd(6)} ${vlan.name}`))];
+          if (!selectedNode.vlans?.length) output.push('No VLANs configured.');
+        } else if (topic === 'mac-address-table') {
+          output = ['Vlan  Mac Address          Type    Ports'];
+          nodes.filter((node) => node.id !== devId && node.mac).slice(0, 8).forEach((node, index) => output.push(`1     ${node.mac.padEnd(20)} dynamic Fa0/${index + 1}`));
+        } else if (topic === 'ip interface brief') {
+          output = ['Interface        IP Address      Status'];
+          (selectedNode.interfaces || []).forEach((intf) => output.push(`${(intf.name || 'eth0').padEnd(16)} ${(intf.ip || 'unassigned').padEnd(15)} ${intf.enabled === false ? 'down' : 'up'}`));
+        } else if (topic === 'access-list' || topic === 'rules') {
+          output = ['Firewall rules:', ...((selectedNode.rules || []).map((rule, index) => `${index + 1} ${rule.action} ${rule.targetIp}${rule.port ? ` port ${rule.port}` : ''}`))];
+          if (!selectedNode.rules?.length) output.push('No firewall rules configured.');
+        } else {
+          output = [`Unrecognized show command: show ${topic || ''}`];
+        }
+        break;
+      }
+
       case 'ipconfig':
       case 'ifconfig':
-        if (arg === '/renew') {
+        if (args[0]?.toLowerCase() === '/renew') {
           const lease = simulateDhcpLease(nodes, links, selectedNode.id);
           if (lease.success) {
             updateSelectedNode('ip', lease.offeredIp);
             updateSelectedNode('prefixLength', lease.prefixLength);
             updateSelectedNode('gateway', lease.gateway);
             output = [
-              `Renewing IP address for ${selectedNode.name} via DHCP...`,
-              `DHCP Discover sent -> DHCP Offer received from ${lease.gateway}`,
-              `DHCP Request -> DHCP ACK confirmed!`,
-              `Lease Granted:`,
-              `  IPv4 Address:    ${lease.offeredIp}`,
-              `  Subnet Mask:     /${lease.prefixLength}`,
-              `  Default Gateway: ${lease.gateway}`,
-              `  DNS Server:      ${lease.dns}`,
+              { kind: 'info', text: `Renewing IP address for ${selectedNode.name} via DHCP...` },
+              { kind: 'success', text: `Lease Granted: ${lease.offeredIp}/${lease.prefixLength}, gateway ${lease.gateway}, DNS ${lease.dns}` },
             ];
+            checkChallengeSolutionForNodes(nodes.map((node) => node.id === devId ? { ...node, ip: lease.offeredIp, prefixLength: lease.prefixLength, gateway: lease.gateway } : node));
           } else {
-            output = [
-              `Renewing IP address for ${selectedNode.name}...`,
-              `DHCP Discover broadcasted to 255.255.255.255:67...`,
-              `Error: ${lease.error}`,
-            ];
+            output = [{ kind: 'error', text: `DHCP renew failed: ${lease.error}` }];
           }
-        } else if (arg === '/release') {
-          updateSelectedNode('ip', '0.0.0.0');
-          updateSelectedNode('gateway', '');
-          output = [`Released IP lease for ${selectedNode.name}. Interface is unassigned (0.0.0.0).`];
+        } else if (args[0]?.toLowerCase() === '/release') {
+          const released = nodes.map((node) => node.id === devId ? { ...node, ip: '0.0.0.0', gateway: '' } : node);
+          setNodes(released);
+          pushState(released, links);
+          output = [{ kind: 'warning', text: `Released IP lease for ${selectedNode.name}.` }];
         } else {
           output = [
-            `Interface Configuration for ${selectedNode.name}:`,
+            `Interface Configuration for ${selectedNode.name}`,
             `  Host Type:       ${selectedNode.type}`,
             `  Primary MAC:     ${selectedNode.mac || '02:00:00:00:00:01'}`,
             `  IPv4 Address:    ${selectedNode.ip || 'Unassigned'}`,
@@ -1076,45 +1255,39 @@ function Simulator() {
         break;
 
       case 'nslookup': {
-        if (!arg) {
+        if (!args[0]) {
           output = ['Usage: nslookup <domain-name> (e.g. nslookup example.com)'];
           break;
         }
-        const dnsRes = simulateDnsQuery(nodes, links, selectedNode.id, arg);
+        const dnsRes = simulateDnsQuery(nodes, links, selectedNode.id, args[0]);
         if (dnsRes.success) {
           output = [
-            `Server:  8.8.8.8 (Google Public DNS)`,
-            `Address: 8.8.8.8#53`,
-            ``,
-            `Non-authoritative answer:`,
-            `Name:    ${arg}`,
-            `Address: ${dnsRes.resolvedIp}`,
+            { kind: 'info', text: 'Non-authoritative DNS answer:' },
+            { kind: 'success', text: `Name: ${args[0]}  Address: ${dnsRes.resolvedIp}` },
           ];
         } else {
-          output = [`** server can't find ${arg}: NXDOMAIN`];
+          output = [{ kind: 'error', text: `** server can't find ${args[0]}: NXDOMAIN` }];
         }
         break;
       }
 
       case 'curl': {
-        if (!arg) {
+        if (!args[0]) {
           output = ['Usage: curl <url-or-domain> (e.g. curl example.com or curl 93.184.216.34)'];
           break;
         }
-        let targetIp = arg.replace(/^https?:\/\//, '').split('/')[0];
-        let resolvedNote = '';
+        let targetIp = args[0].replace(/^https?:\/\//, '').split('/')[0];
         if (!targetIp.match(/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/)) {
           const resolved = resolveDns(targetIp);
           if (!resolved) {
-            output = [`curl: (6) Could not resolve host: ${targetIp}`];
+            output = [{ kind: 'error', text: `curl: Could not resolve host: ${targetIp}` }];
             break;
           }
-          resolvedNote = `Connected to ${targetIp} (${resolved}) port 80\n`;
           targetIp = resolved;
         }
         const targetNode = nodes.find((n) => n.ip === targetIp || n.interfaces?.some((i) => i.ip === targetIp));
         if (!targetNode) {
-          output = [`curl: (7) Failed to connect to ${targetIp}: Connection timed out`];
+          output = [{ kind: 'error', text: `curl: Failed to connect to ${targetIp}: timed out` }];
           break;
         }
         const sim = simulatePacket({
@@ -1126,24 +1299,12 @@ function Simulator() {
           twoWay: true,
         });
         if (sim.error) {
-          output = [`curl: (7) Connection failed: ${sim.error}`];
+          output = [{ kind: 'error', text: `curl: Connection failed: ${sim.error}` }];
         } else {
           output = [
-            `> GET / HTTP/1.1`,
-            `> Host: ${arg}`,
-            `> User-Agent: curl/8.4.0 (Netwise OS)`,
-            `> Accept: */*`,
-            ``,
-            `< HTTP/1.1 200 OK`,
-            `< Content-Type: text/html; charset=UTF-8`,
-            `< Server: Netwise HTTP Engine`,
-            `< Content-Length: 1256`,
-            ``,
-            `<!doctype html>`,
-            `<html><head><title>Web Service</title></head>`,
-            `<body><h1>Hello from ${targetNode.name}!</h1><p>Connection established over TCP/IP.</p></body></html>`,
+            { kind: 'success', text: `HTTP/1.1 200 OK — Connected to ${targetNode.name} (${targetIp})` },
+            { kind: 'output', text: `<h1>Hello from ${targetNode.name}!</h1>` },
           ];
-          if (resolvedNote) output.unshift(resolvedNote);
         }
         break;
       }
@@ -1163,6 +1324,18 @@ function Simulator() {
         break;
 
       case 'route':
+        if (args[0]?.toLowerCase() === 'add') {
+          const result = applyTerminalConfiguration({ nodes, nodeId: devId, mode, interfaceName, parts });
+          setTerminalModes((prev) => ({ ...prev, [devId]: result.mode }));
+          setTerminalInterfaces((prev) => ({ ...prev, [devId]: result.interfaceName }));
+          if (result.changed) {
+            setNodes(result.nodes);
+            pushState(result.nodes, links);
+            checkChallengeSolutionForNodes(result.nodes);
+          }
+          output = result.output;
+          break;
+        }
         output = [
           `IPv4 Routing Table for ${selectedNode.name}:`,
           `  Network Destination   Netmask          Gateway          Interface`,
@@ -1173,6 +1346,9 @@ function Simulator() {
         if (selectedNode.ip) {
           output.push(`  ${selectedNode.ip.replace(/\.\d+$/, '.0').padEnd(20)}  255.255.255.0    On-link          ${selectedNode.ip}`);
         }
+        (selectedNode.routes || []).forEach((route) => {
+          output.push(`  ${route.network.padEnd(20)}  ${route.prefixLength === 24 ? '255.255.255.0' : `/${route.prefixLength}`}  ${route.nextHop.padEnd(15)}  configured`);
+        });
         break;
 
       case 'nat':
@@ -1185,40 +1361,26 @@ function Simulator() {
         break;
 
       case 'ping': {
-        if (!arg) {
+        if (!args[0]) {
           output = ['Usage: ping <destination-ip>'];
           break;
         }
-        const target = nodes.find((n) => n.ip === arg || n.interfaces?.some((i) => i.ip === arg));
+        const target = nodes.find((n) => n.ip === args[0] || n.interfaces?.some((i) => i.ip === args[0]));
         if (!target) {
           output = [
-            `Pinging ${arg} with 32 bytes of data:`,
-            `Request timed out.`,
-            `Request timed out.`,
-            `Request timed out.`,
-            `Request timed out.`,
-            `Ping statistics for ${arg}: Packets: Sent = 4, Received = 0, Lost = 4 (100% loss)`,
+            { kind: 'error', text: `Pinging ${args[0]}: Request timed out (4/4 lost).` },
           ];
           break;
         }
         const sim = simulatePacket({ nodes, links, sourceId: selectedNode.id, destinationId: target.id, twoWay: true });
         if (sim.error) {
           output = [
-            `Pinging ${arg} with 32 bytes of data:`,
-            `Destination host unreachable: ${sim.error}`,
-            `Ping statistics for ${arg}: Packets: Sent = 4, Received = 0, Lost = 4 (100% loss)`,
+            { kind: 'error', text: `Destination host unreachable: ${sim.error}` },
           ];
         } else {
           output = [
-            `Pinging ${arg} with 32 bytes of data:`,
-            `Reply from ${arg}: bytes=32 time=22ms TTL=7`,
-            `Reply from ${arg}: bytes=32 time=24ms TTL=7`,
-            `Reply from ${arg}: bytes=32 time=21ms TTL=7`,
-            `Reply from ${arg}: bytes=32 time=23ms TTL=7`,
-            ``,
-            `Ping statistics for ${arg}:`,
-            `    Packets: Sent = 4, Received = 4, Lost = 0 (0% loss),`,
-            `Approximate round trip times: Min = 21ms, Max = 24ms, Avg = 22ms`,
+            { kind: 'success', text: `Reply from ${args[0]}: bytes=32 time=22ms TTL=7` },
+            { kind: 'success', text: `Ping statistics: Sent=4 Received=4 Lost=0 (0% loss)` },
           ];
         }
         break;
@@ -1226,48 +1388,113 @@ function Simulator() {
 
       case 'tracert':
       case 'traceroute': {
-        if (!arg) {
+        if (!args[0]) {
           output = ['Usage: traceroute <destination-ip>'];
           break;
         }
-        const target = nodes.find((n) => n.ip === arg || n.interfaces?.some((i) => i.ip === arg));
+        const target = nodes.find((n) => n.ip === args[0] || n.interfaces?.some((i) => i.ip === args[0]));
         if (!target) {
-          output = [`Tracing route to ${arg} over a maximum of 30 hops:`, ` 1    *        *        *     Request timed out.`];
+          output = [{ kind: 'error', text: `Tracing route to ${args[0]}: Request timed out.` }];
           break;
         }
         const sim = simulatePacket({ nodes, links, sourceId: selectedNode.id, destinationId: target.id });
         if (sim.error) {
-          output = [`Tracing route to ${arg}:`, `  Error: ${sim.error}`];
+          output = [{ kind: 'error', text: `Tracing route to ${args[0]}: ${sim.error}` }];
         } else {
-          output = [`Tracing route to ${target.name} [${arg}] over a maximum of 8 hops:`];
+          output = [{ kind: 'info', text: `Tracing route to ${target.name} [${args[0]}]` }];
           const visitedHops = [...new Set(sim.events.map((e) => e.nodeId))];
           visitedHops.forEach((hId, idx) => {
             const hNode = nodes.find((n) => n.id === hId);
-            output.push(`  ${idx + 1}    ${(idx + 1) * 8} ms    ${(idx + 1) * 7} ms    ${(idx + 1) * 8} ms    ${hNode?.name || 'Hop'} [${hNode?.ip || '192.168.1.1'}]`);
+            output.push({ kind: 'output', text: ` ${idx + 1}  ${hNode?.name || 'Hop'} [${hNode?.ip || '192.168.1.1'}]  ${(idx + 1) * 8} ms` });
           });
-          output.push(`Trace complete.`);
+          output.push({ kind: 'success', text: 'Trace complete.' });
         }
         break;
       }
 
-      default:
-        output = [`'${cmd}' is not recognized as an internal command. Type 'help' for command list.`];
+      default: {
+        const suggestion = suggestCommand(cmd, getDeviceCommands(selectedNode, mode));
+        output = [{ kind: 'error', text: `% Unknown command '${cmd}'.${suggestion ? ` Did you mean '${suggestion}'?` : " Type 'help' for commands."}` }];
+      }
     }
 
-    setTerminalLogs((prev) => ({
-      ...prev,
-      [devId]: [...currentLogs, `${selectedNode.name.toLowerCase()}~$ ${trimmed}`, ...output],
-    }));
+    appendCommand(output);
     setTerminalInput('');
   };
 
+  const terminalLogText = (terminalLogs[selectedNode?.id] || [])
+    .map((line) => (typeof line === 'string' ? line : line.text))
+    .join('\n');
+
+  const copyTerminalOutput = async () => {
+    const text = terminalLogText;
+    try {
+      await navigator.clipboard.writeText(text);
+      setSimMessage('Terminal output copied.');
+    } catch {
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      textarea.remove();
+      setSimMessage('Terminal output copied.');
+    }
+  };
+
+  const downloadTerminalOutput = () => {
+    const blob = new Blob([terminalLogText], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `netwise-${selectedNode.name.replace(/\s+/g, '-').toLowerCase()}-terminal.txt`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const clearTerminalOutput = () => {
+    setTerminalLogs((prev) => ({ ...prev, [selectedNode.id]: [] }));
+  };
+
+  const resetTerminalDevice = () => {
+    setTerminalLogs((prev) => ({ ...prev, [selectedNode.id]: [
+      `Netwise OS v1.5 [${selectedNode.name} - ${selectedNode.type}]`,
+      'Terminal reset. Type `help` to begin.',
+    ] }));
+    setTerminalModes((prev) => ({ ...prev, [selectedNode.id]: 'user' }));
+    setTerminalInterfaces((prev) => ({ ...prev, [selectedNode.id]: '' }));
+    setTerminalInput('');
+  };
+
+  const renderTerminalText = (text) => {
+    const parts = String(text).split(/((?:\d{1,3}\.){3}\d{1,3}(?:\/\d{1,2})?)/g);
+    return parts.map((part, index) => {
+      if (/^(?:\d{1,3}\.){3}\d{1,3}(?:\/\d{1,2})?$/.test(part)) {
+        const ip = part.split('/')[0];
+        return (
+          <button
+            type="button"
+            key={`${part}-${index}`}
+            className="terminal-address-link"
+            title={`Use ${part}`}
+            onClick={() => setTerminalInput((value) => value.trim() ? value : `ping ${ip}`)}
+          >
+            {part}
+          </button>
+        );
+      }
+      return <span key={`${part}-${index}`}>{part}</span>;
+    });
+  };
+
   /* -------- Challenge Verification -------- */
-  const checkChallengeSolution = () => {
+  const checkChallengeSolutionForNodes = (candidateNodes) => {
     if (!activeChallenge) return;
-    const res = activeChallenge.verify(nodes, links);
+    const res = activeChallenge.verify(candidateNodes, links);
     if (res.ok) {
       setChallengeSolvedMsg(`🎉 Congratulations! Challenge Solved: ${res.msg}`);
       setChallengeErrorMsg('');
+      setChallengeHintVisible(false);
       playPingSuccess();
       try {
         const raw = window.localStorage.getItem('netwise.challenges.solved');
@@ -1275,15 +1502,22 @@ function Simulator() {
         if (!list.includes(activeChallenge.id)) {
           window.localStorage.setItem('netwise.challenges.solved', JSON.stringify([...list, activeChallenge.id]));
         }
+        const profile = markChallengeSolved(loadProfile(), activeChallenge.id);
+        saveProfile(profile);
       } catch {
         /* ignore */
       }
     } else {
       setChallengeErrorMsg(`❌ ${res.msg}`);
       setChallengeSolvedMsg('');
+      setChallengeHintVisible(true);
+      const profile = recordChallengeAttempt(loadProfile(), activeChallenge.id);
+      saveProfile(profile);
       playPacketDrop();
     }
   };
+
+  const checkChallengeSolution = () => checkChallengeSolutionForNodes(nodes);
 
   /* -------- Traffic Simulation Control -------- */
   const startTraffic = () => {
@@ -1412,6 +1646,9 @@ function Simulator() {
     setConnectMode(false);
     setConnectFromId(null);
     setView({ x: 0, y: 0, scale: 1 });
+    setTerminalLogs({});
+    setTerminalModes({});
+    setTerminalInterfaces({});
     setActiveChallenge(null);
     setChallengeSolvedMsg('');
     setChallengeErrorMsg('');
@@ -1431,8 +1668,7 @@ function Simulator() {
   };
 
   /* Filtered packet capture frames */
-  const capturedFrames = useMemo(() => {
-    return trace.map((evt, idx) => ({
+  const capturedFrames = trace.map((evt, idx) => ({
       num: idx + 1,
       time: (idx * 0.012).toFixed(3),
       src: evt.packetDetails?.ip?.srcIp || evt.packetDetails?.frame?.srcMac || '0.0.0.0',
@@ -1446,7 +1682,6 @@ function Simulator() {
       const q = packetFilter.toLowerCase();
       return f.protocol.toLowerCase().includes(q) || f.src.includes(q) || f.dst.includes(q) || f.info.toLowerCase().includes(q);
     });
-  }, [trace, packetFilter]);
 
   /* -------- Render -------- */
   return (
@@ -1467,6 +1702,12 @@ function Simulator() {
               Exit Lab
             </a>
           </div>
+        </div>
+      )}
+
+      {activeChallenge && challengeHintVisible && (
+        <div className="challenge-banner-feedback feedback-hint" role="status">
+          <strong>Targeted hint:</strong> {activeChallenge.hint}
         </div>
       )}
 
@@ -1495,6 +1736,32 @@ function Simulator() {
               <option key={k} value={k}>{p.name}</option>
             ))}
           </select>
+
+          {customTopologies.length > 0 && (
+            <select
+              className="preset-select"
+              onChange={(e) => {
+                loadCustomTopology(e.target.value);
+                e.target.value = '';
+              }}
+              defaultValue=""
+              aria-label="Load saved topology"
+            >
+              <option value="" disabled>Saved networks...</option>
+              {customTopologies.map((topology) => (
+                <option key={topology.id} value={topology.id}>{topology.name}</option>
+              ))}
+            </select>
+          )}
+
+          <button
+            className="button button-secondary"
+            type="button"
+            onClick={saveCustomTopology}
+            title="Save this topology in your browser"
+          >
+            Save
+          </button>
 
           <button
             className="button button-secondary"
@@ -1826,6 +2093,21 @@ function Simulator() {
                     value={packetFilter}
                     onChange={(e) => setPacketFilter(e.target.value)}
                   />
+                  <button
+                    type="button"
+                    className="button button-secondary pcap-btn"
+                    onClick={() => setIsCapturing(true)}
+                  >
+                    {isCapturing ? '● Capturing' : 'Start capture'}
+                  </button>
+                  <button
+                    type="button"
+                    className="button button-secondary pcap-btn"
+                    onClick={() => setIsCapturing(false)}
+                    disabled={!isCapturing}
+                  >
+                    Stop
+                  </button>
                   <button type="button" className="button button-secondary pcap-btn" onClick={exportPcapJson}>
                     💾 Export PCAP JSON
                   </button>
@@ -2147,7 +2429,23 @@ function Simulator() {
                     <span className="terminal-dot red" />
                     <span className="terminal-dot yellow" />
                     <span className="terminal-dot green" />
-                    <span className="terminal-title">{selectedNode.name} Console ({selectedNode.ip || 'no-ip'})</span>
+                    <span className="terminal-title">
+                      {selectedNode.name} Console ({selectedNode.ip || 'no-ip'})
+                      {' '}· {terminalModes[selectedNode.id] || 'user'} mode
+                    </span>
+                    <button
+                      type="button"
+                      className="terminal-action-btn"
+                      onClick={() => setTerminalPaletteOpen((open) => !open)}
+                      aria-expanded={terminalPaletteOpen}
+                      title="Command palette"
+                    >
+                      ⌘ Commands
+                    </button>
+                    <button type="button" className="terminal-action-btn" onClick={copyTerminalOutput} title="Copy terminal output">Copy</button>
+                    <button type="button" className="terminal-action-btn" onClick={downloadTerminalOutput} title="Download terminal output">Download</button>
+                    <button type="button" className="terminal-action-btn" onClick={clearTerminalOutput} title="Clear terminal output">Clear</button>
+                    <button type="button" className="terminal-action-btn" onClick={resetTerminalDevice} title="Reset this device terminal">Reset</button>
                     <button
                       type="button"
                       className="terminal-expand-btn"
@@ -2159,15 +2457,50 @@ function Simulator() {
                     </button>
                   </div>
 
+                  {terminalPaletteOpen && (
+                    <div className="terminal-command-palette" aria-label="Terminal command palette">
+                      {getDeviceCommands(selectedNode, terminalModes[selectedNode.id] || 'user').map((command) => (
+                        <button
+                          type="button"
+                          key={command}
+                          onClick={() => {
+                            setTerminalInput(command);
+                            setTerminalPaletteOpen(false);
+                          }}
+                        >
+                          {command}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
                   <div className="terminal-screen" aria-label="Terminal output">
                     {(terminalLogs[selectedNode.id] || [
                       `Netwise OS v1.5 [${selectedNode.name}]`,
                       `Type 'help' for network commands (ping, curl, nslookup, ipconfig /renew, arp -a).`,
                     ]).map((line, idx) => (
-                      <div key={idx} className="terminal-line">{line}</div>
+                      <div
+                        key={idx}
+                        className={`terminal-line terminal-${typeof line === 'object' ? (line.kind || 'output') : 'output'}`}
+                      >
+                        {renderTerminalText(typeof line === 'string' ? line : line.text)}
+                      </div>
                     ))}
                     <div ref={terminalBottomRef} />
                   </div>
+
+                  {terminalInput && (
+                    <div className="terminal-inline-hint" role="status">
+                      {(() => {
+                        const mode = terminalModes[selectedNode.id] || 'user';
+                        const completed = completeTerminalInput(terminalInput, selectedNode, mode);
+                        if (typeof completed === 'string') return `Tab: ${completed}`;
+                        if (completed.length) return `Suggestions: ${completed.slice(0, 4).join(' · ')}`;
+                        const suggested = suggestCommand(terminalInput, getDeviceCommands(selectedNode, mode));
+                        return suggested ? `Did you mean: ${suggested}?` : 'Press Tab to complete';
+                      })()}
+                    </div>
+                  )}
 
                   <form
                     className="terminal-input-row"
@@ -2176,29 +2509,54 @@ function Simulator() {
                       executeTerminalCommand(terminalInput);
                     }}
                   >
-                    <span className="terminal-prompt">$</span>
+                    <span className="terminal-prompt">
+                      {terminalPrompt(selectedNode, terminalModes[selectedNode.id] || 'user', terminalInterfaces[selectedNode.id] || '')}
+                    </span>
                     <input
                       type="text"
                       value={terminalInput}
                       onChange={(e) => setTerminalInput(e.target.value)}
                       onKeyDown={(e) => {
+                        if (e.key === 'Tab') {
+                          e.preventDefault();
+                          const mode = terminalModes[selectedNode.id] || 'user';
+                          const completed = completeTerminalInput(terminalInput, selectedNode, mode);
+                          if (typeof completed === 'string') setTerminalInput(completed);
+                        } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'l') {
+                          e.preventDefault();
+                          clearTerminalOutput();
+                        } else if (e.ctrlKey && e.key.toLowerCase() === 'c') {
+                          e.preventDefault();
+                          setTerminalLogs((prev) => ({
+                            ...prev,
+                            [selectedNode.id]: [
+                              ...(prev[selectedNode.id] || []),
+                              { kind: 'warning', text: '^C Command cancelled' },
+                            ],
+                          }));
+                          setTerminalInput('');
+                        }
                         if (e.key === 'ArrowUp') {
                           e.preventDefault();
-                          if (cmdHistory.length > 0) {
-                            const nextPtr = historyPointer === -1 ? cmdHistory.length - 1 : Math.max(0, historyPointer - 1);
-                            setHistoryPointer(nextPtr);
-                            setTerminalInput(cmdHistory[nextPtr]);
+                          const devHistory = terminalHistories[selectedNode.id] || [];
+                          if (devHistory.length > 0) {
+                            const pointer = terminalHistoryPointers[selectedNode.id] ?? -1;
+                            const nextPtr = pointer === -1 ? devHistory.length - 1 : Math.max(0, pointer - 1);
+                            setTerminalHistoryPointers((prev) => ({ ...prev, [selectedNode.id]: nextPtr }));
+                            setTerminalInput(devHistory[nextPtr]);
                           }
                         } else if (e.key === 'ArrowDown') {
                           e.preventDefault();
-                          if (historyPointer !== -1) {
-                            const nextPtr = historyPointer + 1;
-                            if (nextPtr >= cmdHistory.length) {
-                              setHistoryPointer(-1);
+                          const pointer = terminalHistoryPointers[selectedNode.id] ?? -1;
+                          const devHistory = terminalHistories[selectedNode.id] || [];
+                          if (pointer !== -1) {
+                            const nextPtr = pointer + 1;
+                            if (nextPtr >= devHistory.length) {
+                              setTerminalHistoryPointers((prev) => ({ ...prev, [selectedNode.id]: -1 }));
                               setTerminalInput('');
                             } else {
-                              setHistoryPointer(nextPtr);
-                              setTerminalInput(cmdHistory[nextPtr]);
+                              setTerminalHistoryPointers((prev) => ({ ...prev, [selectedNode.id]: nextPtr }));
+                              setTerminalInput(devHistory[nextPtr]);
                             }
                           }
                         }

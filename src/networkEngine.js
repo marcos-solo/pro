@@ -115,7 +115,7 @@ export function findInterfaceByIp(nodes, address) {
   return null;
 }
 
-export function findLayer2Path(nodes, links, sourceId, destinationId) {
+export function findLayer2Path(nodes, links, sourceId, destinationId, linkStates = null) {
   const queue = [[sourceId]];
   const visited = new Set([sourceId]);
 
@@ -124,9 +124,13 @@ export function findLayer2Path(nodes, links, sourceId, destinationId) {
     const currentId = path[path.length - 1];
     if (currentId === destinationId) return path;
 
-    const neighbors = links.flatMap(({ from, to }) => (
-      from === currentId ? [to] : to === currentId ? [from] : []
-    ));
+    const neighbors = links.flatMap(({ from, to }) => {
+      if (linkStates) {
+        const linkKey = `${Math.min(from, to)}-${Math.max(from, to)}`;
+        if (linkStates[linkKey] === 'blocking') return [];
+      }
+      return from === currentId ? [to] : to === currentId ? [from] : [];
+    });
 
     for (const neighborId of neighbors) {
       const neighbor = nodes.find((node) => node.id === neighborId);
@@ -421,6 +425,7 @@ export function simulatePacket({
   const switchTables = new Map(nodes.filter((node) => node.type === 'Switch').map((node) => [node.id, new Map()]));
   const arpCache = new Map();
   const natTable = new Map(); // Router ID -> [{ internal, external }]
+  const stpResult = calculateSpanningTree(nodes, links);
 
   const runOneWay = (srcNode, dstNode, isReturn = false) => {
     let packetTtl = DEFAULT_TTL;
@@ -485,7 +490,7 @@ export function simulatePacket({
     }
 
     const sendFrame = (fromNode, toNode, fromInterface, toInterface, destinationMac, frameDescription) => {
-      const path = findLayer2Path(nodes, links, fromNode.id, toNode.id);
+      const path = findLayer2Path(nodes, links, fromNode.id, toNode.id, stpResult.linkStates);
       if (!path.length) return false;
       for (let index = 1; index < path.length - 1; index += 1) {
         const switchId = path[index];
@@ -581,6 +586,9 @@ export function simulatePacket({
           currentInterface.prefixLength,
         );
         if (sameSubnet) {
+          if (currentNode.vlan && dstNode.vlan && currentNode.vlan !== dstNode.vlan) {
+            return fail(currentNode.id, `VLAN Isolation: ${currentNode.name} (VLAN ${currentNode.vlan}) and ${dstNode.name} (VLAN ${dstNode.vlan}) are in different VLANs and cannot communicate without an L3 router.`);
+          }
           nextHopIp = dstNode.ip;
           ipDestinationNode = dstNode;
         } else {
@@ -635,6 +643,25 @@ export function simulatePacket({
       if (!firstForward) {
         packetTtl -= 1;
         if (packetTtl <= 0) return fail(router.id, `${router.name} dropped the packet because its TTL expired.`);
+      }
+
+      // Access Control List (ACL) inspection on router
+      if (Array.isArray(router.rules) && router.rules.length > 0) {
+        const deniedRule = router.rules.find((r) => {
+          if (r.action !== 'deny') return false;
+          if (r.targetIp && r.targetIp !== 'any' && r.targetIp !== dstNode.ip && currentSrcIp !== r.targetIp) return false;
+          if (r.port && Number(r.port) !== Number(port)) return false;
+          return true;
+        });
+        if (deniedRule) {
+          addEvent(
+            router.id,
+            'ACL Deny',
+            `${router.name} dropped the packet matching Access Control List (ACL) rule "${deniedRule.name || 'Deny'}".`,
+            'error',
+          );
+          return fail(router.id, `${router.name} Access Control List (ACL) dropped packet (rule "${deniedRule.name || 'Deny'}").`);
+        }
       }
 
       const route = findRouterRoute(router, dstNode.ip);
@@ -905,4 +932,107 @@ export function parseIpv6(input) {
     classification,
     hextets: normalized,
   };
+}
+
+/**
+ * Calculates Spanning Tree Protocol (802.1D STP) states across switches.
+ * Elects the switch with the lowest numeric ID as the Root Bridge.
+ * Links in the shortest-path tree are 'forwarding'; redundant loop links are 'blocking'.
+ */
+export function calculateSpanningTree(nodes = [], links = []) {
+  const switches = nodes.filter((n) => n.type === 'Switch');
+  if (switches.length <= 1) {
+    return {
+      rootBridgeId: switches[0]?.id ?? null,
+      linkStates: {},
+    };
+  }
+
+  // Elect Root Bridge: lowest switch ID
+  const sortedSwitches = [...switches].sort((a, b) => a.id - b.id);
+  const rootBridge = sortedSwitches[0];
+  const switchIds = new Set(switches.map((s) => s.id));
+  const linkStates = {};
+
+  const visited = new Set([rootBridge.id]);
+  const queue = [rootBridge.id];
+  const treeLinks = new Set();
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    const incidentLinks = links.filter(
+      (l) => (l.from === current && switchIds.has(l.to)) || (l.to === current && switchIds.has(l.from)),
+    );
+
+    for (const l of incidentLinks) {
+      const neighbor = l.from === current ? l.to : l.from;
+      const linkKey = `${Math.min(l.from, l.to)}-${Math.max(l.from, l.to)}`;
+      if (!visited.has(neighbor)) {
+        visited.add(neighbor);
+        treeLinks.add(linkKey);
+        queue.push(neighbor);
+      }
+    }
+  }
+
+  // Assign forwarding vs blocking on all switch-to-switch links
+  links.forEach((l) => {
+    if (switchIds.has(l.from) && switchIds.has(l.to)) {
+      const linkKey = `${Math.min(l.from, l.to)}-${Math.max(l.from, l.to)}`;
+      linkStates[linkKey] = treeLinks.has(linkKey) ? 'forwarding' : 'blocking';
+    }
+  });
+
+  return {
+    rootBridgeId: rootBridge.id,
+    linkStates,
+  };
+}
+
+/**
+ * Automatically calculates dynamic routing entries (OSPF/RIP simulation)
+ * between interconnected routers across direct interfaces.
+ */
+export function calculateDynamicRoutes(nodes = [], links = [], protocol = 'OSPF') {
+  const routers = nodes.filter((n) => n.type === 'Router' || n.type === 'L3Switch');
+  if (routers.length <= 1) return nodes;
+
+  // Build network map of connected subnets per router
+  const routerSubnets = new Map();
+  routers.forEach((r) => {
+    const subnets = interfacesFor(r).map((intf) => ({
+      network: calculateSubnet(intf.ip, intf.prefixLength)?.network || intf.ip,
+      prefixLength: intf.prefixLength,
+      interfaceIp: intf.ip,
+    }));
+    routerSubnets.set(r.id, subnets);
+  });
+
+  return nodes.map((node) => {
+    if (node.type !== 'Router' && node.type !== 'L3Switch') return node;
+    const existing = node.routes || [];
+    const dynamicRoutes = [];
+
+    // Find routes learned from neighbor routers
+    routers.forEach((other) => {
+      if (other.id === node.id) return;
+      const otherSubnets = routerSubnets.get(other.id) || [];
+      otherSubnets.forEach((sub) => {
+        const isLocal = (node.interfaces || []).some((i) => prefixMatches(i.ip, sub.network, sub.prefixLength));
+        if (!isLocal && !existing.some((r) => r.network === sub.network)) {
+          dynamicRoutes.push({
+            network: sub.network,
+            prefixLength: sub.prefixLength,
+            nextHop: sub.interfaceIp,
+            protocol,
+          });
+        }
+      });
+    });
+
+    return {
+      ...node,
+      routes: [...existing, ...dynamicRoutes],
+    };
+  });
 }

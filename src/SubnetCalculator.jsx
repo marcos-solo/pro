@@ -64,6 +64,37 @@ function SubnetCalculator() {
 
   const ipv6Result = useMemo(() => parseIpv6(ipv6Input.trim()), [ipv6Input]);
 
+  const copyText = async (text) => {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      textarea.remove();
+    }
+  };
+
+  const exportCalculatorJson = () => {
+    const payload = {
+      cidr: result,
+      vlsm: vlsmResult,
+      routeSummary: summaryResult,
+      ipv6: ipv6Result,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `netwise-network-plan-${Date.now()}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
   const addVlsmRow = () => {
     setVlsmSubnets((prev) => [
       ...prev,
@@ -89,9 +120,22 @@ function SubnetCalculator() {
           <h1>IP & Subnet <span>Calculator</span></h1>
           <p>Explore CIDR notation, VLSM planning, supernet route summarization, and IPv6.</p>
         </div>
-        <a className="button button-primary" href="/simulator">
-          Open in Simulator <span aria-hidden="true">→</span>
-        </a>
+        <div className="calculator-heading-actions">
+          <button
+            type="button"
+            className="button button-secondary"
+            onClick={() => copyText(JSON.stringify({ cidr: result, vlsm: vlsmResult, routeSummary: summaryResult, ipv6: ipv6Result }, null, 2))}
+            disabled={!result && !vlsmResult && !summaryResult && !ipv6Result}
+          >
+            Copy results
+          </button>
+          <button type="button" className="button button-secondary" onClick={exportCalculatorJson}>
+            Export JSON
+          </button>
+          <a className="button button-primary" href="/simulator">
+            Open in Simulator <span aria-hidden="true">→</span>
+          </a>
+        </div>
       </div>
 
       {/* Mode Navigation Tabs */}

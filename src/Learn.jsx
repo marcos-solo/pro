@@ -1,4 +1,10 @@
 import { useEffect, useState } from 'react';
+import {
+  loadProfile,
+  markLessonComplete,
+  recordQuizAnswer,
+  saveProfile,
+} from './progressStore.js';
 
 const TOPIC_DATA = [
   {
@@ -336,6 +342,11 @@ function Learn() {
   const [quizScores, setQuizScores] = useState(loadQuizScores);
   const [selectedAnswers, setSelectedAnswers] = useState({});
   const [query, setQuery] = useState('');
+  const [profile, setProfile] = useState(loadProfile);
+
+  useEffect(() => {
+    saveProfile(profile);
+  }, [profile]);
 
   useEffect(() => {
     saveCompleted(completed);
@@ -375,6 +386,7 @@ function Learn() {
     const next = completed.includes(id) ? completed : [...completed, id];
     setCompleted(next);
     saveCompleted(next);
+    setProfile((previous) => markLessonComplete(previous, id));
   };
 
   const handleQuizAnswer = (lessonId, optionIndex) => {
@@ -383,6 +395,7 @@ function Learn() {
     const isCorrect = optionIndex === topic.quiz.answer;
     setSelectedAnswers((prev) => ({ ...prev, [lessonId]: optionIndex }));
     setQuizScores((prev) => ({ ...prev, [lessonId]: isCorrect }));
+    setProfile((previous) => recordQuizAnswer(previous, lessonId, isCorrect));
     if (isCorrect) {
       markComplete(lessonId);
     }

@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  calculateDynamicRoutes,
   calculateRouteSummary,
+  calculateSpanningTree,
   calculateSubnet,
   calculateVlsm,
   parseIpv6,
@@ -183,4 +185,86 @@ test('simulates DNS domain resolution', () => {
   assert.equal(res.resolvedIp, '93.184.216.34');
   assert.ok(res.events.some((e) => e.title.includes('DNS Query')));
   assert.ok(res.events.some((e) => e.title.includes('DNS Response')));
+});
+
+test('calculates Spanning Tree Protocol (STP) root bridge and blocks redundant links', () => {
+  const switches = [
+    { id: 10, name: 'SW-Core', type: 'Switch' },
+    { id: 20, name: 'SW-Access1', type: 'Switch' },
+    { id: 30, name: 'SW-Access2', type: 'Switch' },
+  ];
+  // Triangle loop between switches
+  const switchLinks = [
+    { from: 10, to: 20 },
+    { from: 20, to: 30 },
+    { from: 30, to: 10 },
+  ];
+  const stp = calculateSpanningTree(switches, switchLinks);
+  assert.equal(stp.rootBridgeId, 10); // Lowest ID elected root
+  const states = Object.values(stp.linkStates);
+  assert.equal(states.filter((s) => s === 'forwarding').length, 2);
+  assert.equal(states.filter((s) => s === 'blocking').length, 1);
+});
+
+test('calculates dynamic OSPF routes between interconnected routers', () => {
+  const routerA = {
+    id: 1,
+    name: 'R1',
+    type: 'Router',
+    interfaces: [
+      { name: 'Gi0/0', ip: '10.0.0.1', prefixLength: 30 },
+      { name: 'Gi0/1', ip: '192.168.10.1', prefixLength: 24 },
+    ],
+  };
+  const routerB = {
+    id: 2,
+    name: 'R2',
+    type: 'Router',
+    interfaces: [
+      { name: 'Gi0/0', ip: '10.0.0.2', prefixLength: 30 },
+      { name: 'Gi0/1', ip: '172.16.20.1', prefixLength: 24 },
+    ],
+  };
+  const updatedNodes = calculateDynamicRoutes([routerA, routerB], [{ from: 1, to: 2 }], 'OSPF');
+  const r1Updated = updatedNodes.find((n) => n.id === 1);
+  assert.ok(r1Updated.routes.some((r) => r.network === '172.16.20.0' && r.protocol === 'OSPF'));
+});
+
+test('enforces VLAN isolation between different VLANs on same switch', () => {
+  const vlanNodes = [
+    { id: 1, name: 'PC-Sales', type: 'Device', ip: '192.168.1.10', prefixLength: 24, vlan: 10 },
+    { id: 2, name: 'PC-Dev', type: 'Device', ip: '192.168.1.20', prefixLength: 24, vlan: 20 },
+    { id: 3, name: 'SW', type: 'Switch' },
+  ];
+  const vlanLinks = [
+    { from: 1, to: 3 },
+    { from: 2, to: 3 },
+  ];
+  const result = simulatePacket({ nodes: vlanNodes, links: vlanLinks, sourceId: 1, destinationId: 2 });
+  assert.match(result.error, /VLAN Isolation/);
+});
+
+test('enforces router Access Control List (ACL) inspection', () => {
+  const aclNodes = [
+    { id: 1, name: 'PC1', type: 'Device', ip: '192.168.1.10', prefixLength: 24, gateway: '192.168.1.1' },
+    {
+      id: 2,
+      name: 'R1',
+      type: 'Router',
+      interfaces: [
+        { ip: '192.168.1.1', prefixLength: 24 },
+        { ip: '10.0.0.1', prefixLength: 24 },
+      ],
+      rules: [
+        { action: 'deny', targetIp: '10.0.0.50', name: 'Block-Secret' },
+      ],
+    },
+    { id: 3, name: 'Server', type: 'Server', ip: '10.0.0.50', prefixLength: 24, gateway: '10.0.0.1' },
+  ];
+  const aclLinks = [
+    { from: 1, to: 2 },
+    { from: 2, to: 3 },
+  ];
+  const result = simulatePacket({ nodes: aclNodes, links: aclLinks, sourceId: 1, destinationId: 3 });
+  assert.match(result.error, /Access Control List/);
 });
